@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
 import os
-from office365.runtime.auth.client_credential import ClientCredential
-from office365.runtime.auth.user_credential import UserCredential
+import json
 from office365.sharepoint.client_context import ClientContext
-from office365.sharepoint.files.file import File
-from office365.sharepoint.folders.folder import Folder
 from dotenv import load_dotenv
 import logging
+import re
 from match_excel import run_matching_process
+import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -17,34 +16,150 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# log_file = "E:\\FRCI\\AuditLog.txt"
+# message = f"Script ran at: {datetime.datetime.now()}\n"
+ 
+# with open(log_file, "a") as f:
+#     f.write(message)
+
+def sanitize_json_string(s):
+    # Remove trailing commas before closing } or ]
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+    return s
 class SharePointService:
     def __init__(self):
         """Initialize SharePoint service with credentials from environment variables."""
         # Load environment variables
-        load_dotenv()
+        load_dotenv(override=True)
         
         # Get SharePoint configuration from environment variables
+        # self.site_url = os.getenv('SITE_URL')
+        # self.client_username = os.getenv('SP_USERNAME')
+        # self.client_password = os.getenv('PASSWORD')
         self.site_url = os.getenv('SITE_URL')
-        self.client_username = os.getenv('SP_USERNAME')
-        self.client_password = os.getenv('PASSWORD')
-        
-        # Validate required environment variables
-        if not all([self.site_url, self.client_username, self.client_password]):
-            raise ValueError("Missing required SharePoint configuration in .env file")
-        
-        # Initialize SharePoint credentials
-        self.credentials = UserCredential(self.client_username, self.client_password)
+        self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
+        self.client_id = os.getenv('CLIENT_ID')
+        self.tenant=os.getenv('TENANT')
+        self.cert_path=os.getenv('CERT_PATH')
+
+        # self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
+        # self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
+        # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
+        # self.tenant= "citybrokersltdmu.onmicrosoft.com"
+        # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
+
+
+        self.cert_credentials = { 
+            'tenant': self.tenant,
+            'client_id': self.client_id,
+            'thumbprint': self.cert_thumbprint,
+            'cert_path': self.cert_path
+        }
         self.ctx = None
+        
+        # # Validate required environment variables
+        # if not all([self.site_url, self.client_username, self.client_password]):
+        #     raise ValueError("Missing required SharePoint configuration in .env file")
+        
+        # # Initialize SharePoint credentials
+        # self.credentials = UserCredential(self.client_username, self.client_password)
+        # self.ctx = None
+
 
     def get_client_context(self):
         """Get SharePoint client context."""
         print(self.site_url)
         try:
             if not self.ctx:
-                self.ctx = ClientContext(self.site_url).with_credentials(self.credentials)
+                self.ctx = ClientContext(self.site_url).with_client_certificate(**self.cert_credentials)
             return self.ctx
         except Exception as ex:
             logger.error(f"Failed to get SharePoint client context: {str(ex)}")
+            raise
+
+    def get_column_mappings(self,  insurer_name = None) :
+        try: 
+            library_name = "Mappings"
+            ctx = self.get_client_context()
+            library = ctx.web.lists.get_by_title(library_name)
+            
+            query_cbl = f"Title eq 'CBL'"
+            query_insurer = f"Title eq '{insurer_name}'"
+
+            items_insurer = library.items.filter(query_insurer).select(['ColumnMappings']).get().execute_query()
+            items_cbl = library.items.filter(query_cbl).select(['ColumnMappings']).get().execute_query()
+            
+            # Parse the raw column mappings from SharePoint
+            insurer_mappings_raw = items_insurer[0].properties['ColumnMappings']
+            cbl_mappings_raw = items_cbl[0].properties['ColumnMappings']
+            
+            # Parse JSON strings into Python dictionaries
+            insurer_mappings = json.loads(sanitize_json_string(insurer_mappings_raw)) if insurer_mappings_raw else {}
+            cbl_mappings = json.loads(sanitize_json_string(cbl_mappings_raw)) if cbl_mappings_raw else {}
+
+            print(insurer_mappings)
+            print(cbl_mappings)
+            
+            # Return the mappings in the expected format
+            return {
+                'insurer_mappings': insurer_mappings,
+                'cbl_mappings': cbl_mappings
+            }
+        except Exception as ex:
+            logger.error(f"Failed to get column mappings: {str(ex)}")
+            raise
+
+    def get_matrix(self, insurer_name=None):
+        try:
+            ctx = self.get_client_context()
+            library = ctx.web.lists.get_by_title("Matrix")
+            ctx.load(library)
+            ctx.execute_query()
+
+            # Get the root folder of the library
+            root_folder = library.root_folder
+            ctx.load(root_folder)
+            ctx.execute_query()
+
+            # Get all subfolders in the root folder
+            folders = root_folder.folders
+            ctx.load(folders)
+            ctx.execute_query()
+
+            # Find the folder matching the insurer_name
+            insurer_folder_url = None
+            for folder in folders:
+                if folder.name.lower() == insurer_name.lower():
+                    insurer_folder_url = folder.serverRelativeUrl
+                    break
+
+            if not insurer_folder_url:
+                raise ValueError(f"No folder found for insurer: {insurer_name}")
+
+            matrix_folder = ctx.web.get_folder_by_server_relative_url(insurer_folder_url)
+            ctx.load(matrix_folder)
+            ctx.execute_query()
+
+            # Get all list items in the folder
+            list_items = library.items.filter(f"FileDirRef eq '{insurer_folder_url}'").get().execute_query()
+
+            # Collect all list item details
+            all_items = []
+            for item in list_items:
+                try:
+                    # Collect item details
+                    item_details = {
+                        'matrixKey': item.properties.get('Title'),
+                    }
+                    all_items.append(item_details)
+                except Exception as e:
+                    logger.error(f"Error processing list item {item.properties.get('ID')}: {str(e)}")
+                    continue
+
+            return all_items
+
+        except Exception as ex:
+            logger.error(f"Error getting matrix: {str(ex)}")
             raise
 
     def get_pending_folders(self, library_name="Reconciliation Library"):
@@ -73,8 +188,9 @@ class SharePointService:
             
             pending_folders = []
             
-            def process_folder(folder):
+            def process_folder(folder, parent_name=None):
                 """Process folders and their subfolders."""
+                print('PROCESSING FOLDER >> ', folder.name)
                 try:
                     # Load folder properties
                     ctx.load(folder)
@@ -94,9 +210,10 @@ class SharePointService:
                                 'status': status,
                                 'created': list_item.properties.get('Created', ''),
                                 'modified': list_item.properties.get('Modified', ''),
-                                'parent_folder': folder.parent_folder.serverRelativeUrl if folder.parent_folder else None,
+                                'parent_folder': parent_name,
                                 'library': library_name
                             })
+                            print('PENDING FOLDER >> ', pending_folders)
                     except Exception as e:
                         logger.error(f"Error getting list item for folder {folder.name}: {str(e)}")
                     
@@ -106,7 +223,7 @@ class SharePointService:
                     ctx.execute_query()
                     
                     for subfolder in subfolders:
-                        process_folder(subfolder)
+                        process_folder(subfolder, folder.name)
                         
                 except Exception as ex:
                     logger.error(f"Error processing folder {folder.name}: {str(ex)}")
@@ -116,9 +233,9 @@ class SharePointService:
             ctx.load(root_folders)
             ctx.execute_query()
             
-            # Process all folders
+            # Process all folders -- PARENT FOLDER
             for folder in root_folders:
-                process_folder(folder)
+                process_folder(folder, None)
             
             logger.info(f"Found {len(pending_folders)} folders with pending status")
             return pending_folders
@@ -225,7 +342,7 @@ class SharePointService:
             file_list_item = file_obj.listItemAllFields
             ctx.load(file_list_item)
             ctx.execute_query()
-            file_list_item.set_property('Status', 'Completed')
+            file_list_item.set_property('Status', 'Manual Review')
             file_list_item.update()
             ctx.execute_query()
             
@@ -259,8 +376,10 @@ def main():
         for folder in pending_folders:
             logger.info(f"\nProcessing folder: {folder['name']}")
             excel_files = sharepoint_service.get_excel_files_from_folder(folder['url'])
-            
+    
             if len(excel_files) == 2:
+                column_mappings = sharepoint_service.get_column_mappings(folder['parent_folder'])
+                matrix_keys = sharepoint_service.get_matrix(folder['parent_folder'])
                 logger.info(f"Found exactly 2 Excel files in {folder['name']}:")
                 for file in excel_files:
                     logger.info(f"  - {file['name']}")
@@ -288,8 +407,10 @@ def main():
                     
                     # Run matching process
                     result = run_matching_process(
+                        column_mappings=column_mappings,
+                        matrix_keys=matrix_keys,
                         cbl_file=file_paths[0],
-                        swan_file=file_paths[1], 
+                        insurer_file=file_paths[1], 
                         output_file="output.xlsx"
                     )
                     # Upload the result to SharePoint
@@ -307,10 +428,10 @@ def main():
                             folder_list_item = folder_obj.list_item_all_fields
                             ctx.load(folder_list_item)
                             ctx.execute_query()
-                            folder_list_item.set_property('Status', 'Completed')
+                            folder_list_item.set_property('Status', 'Manual Review')
                             folder_list_item.update()
                             ctx.execute_query()
-                            logger.info(f"✓ Updated folder status to 'Completed': {folder['name']}")
+                            logger.info(f"✓ Updated folder status to 'Manual Review': {folder['name']}")
                         except Exception as e:
                             logger.error(f"Error updating folder status: {str(e)}")
                         
@@ -321,10 +442,10 @@ def main():
                                 file_list_item = file_obj.listItemAllFields
                                 ctx.load(file_list_item)
                                 ctx.execute_query()
-                                file_list_item.set_property('Status', 'Completed')
+                                file_list_item.set_property('Status', 'Manual Review')
                                 file_list_item.update()
                                 ctx.execute_query()
-                                logger.info(f"✓ Updated file status to 'Completed': {file['name']}")
+                                logger.info(f"✓ Updated file status to 'Manual Review': {file['name']}")
                             except Exception as e:
                                 logger.error(f"Error updating file status: {str(e)}")
                     
