@@ -379,7 +379,7 @@ def main():
     
             if len(excel_files) == 2:
                 column_mappings = sharepoint_service.get_column_mappings(folder['parent_folder'])
-                matrix_keys = sharepoint_service.get_matrix(folder['parent_folder'])
+                # matrix_keys = sharepoint_service.get_matrix(folder['parent_folder'])
                 logger.info(f"Found exactly 2 Excel files in {folder['name']}:")
                 for file in excel_files:
                     logger.info(f"  - {file['name']}")
@@ -408,7 +408,7 @@ def main():
                     # Run matching process
                     result = run_matching_process(
                         column_mappings=column_mappings,
-                        matrix_keys=matrix_keys,
+                        matrix_keys=[],
                         cbl_file=file_paths[0],
                         insurer_file=file_paths[1], 
                         output_file="output.xlsx"

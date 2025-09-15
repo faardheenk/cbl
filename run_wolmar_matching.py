@@ -22,6 +22,7 @@ def main():
             "Policy No.": "PolicyNo", 
             "Client Name": "ClientName", 
             "Balance (MUR) (Net of Brokerage)": "Amount"
+            # "Balance Net of Brokerage": "Amount"
         },
         'insurer_mappings': {
             "BRKREF": "PlacingNo",
@@ -31,18 +32,42 @@ def main():
             "AMTDUE": "Amount",
         }
     }
+
+
+    # column_mappings = {
+    #     'cbl_mappings': {
+    #         "Placing No.": "PlacingNo",
+    #         "Policy No": "PolicyNo", 
+    #         "Client Name": "ClientName", 
+    #         "Net Amount": "Amount"
+    #     },
+    #     'insurer_mappings': {
+    #         "REF": "PlacingNo",
+    #         "NAME": "ClientName", 
+    #         "POLNO": "PolicyNo_1",
+    #         "AMTDUE": "Amount",
+    #     }
+    # }
     
     # Matrix keys (empty for now, will be determined by the matrix pass)
     matrix_keys = []
     
     # File paths
-    cbl_file = "data/CBL RECON REVIEW.xlsx"
-    insurer_file = "data/SWAN RECON REVIEW.xlsx"
-    output_file = "RESULT RECON REVIEW.xlsx"
+    # cbl_file = "data/CBL RECON REVIEW.xlsx"
+    # insurer_file = "data/SWAN RECON REVIEW.xlsx"
+    # output_file = "RESULT RECON REVIEW.xlsx"
+    
+    cbl_file = "data/CBL.xlsx"
+    insurer_file = "data/SWAN.xlsx"
+    output_file = "RESULT.xlsx"
 
-    # cbl_file = "data/CBL.xlsx"
-    # insurer_file = "data/SWAN.xlsx"
-    # output_file = "RESULT.xlsx"
+    # cbl_file = "data/Demo_Input1.xls"
+    # insurer_file = "data/Demo_Input2.xls"
+    # output_file = "RESULT Demo.xlsx"
+
+    # cbl_file = "data/CBL 12 SEP.xlsx"
+    # insurer_file = "data/SWAN 12 SEP.xlsx"
+    # output_file = "RESULT 12 SEP.xlsx"
     
     logger.info("=== Starting CBL/SWAN Recon Review Matching Process ===")
     logger.info(f"CBL File: {cbl_file}")

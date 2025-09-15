@@ -165,7 +165,7 @@ def add_pass(cbl_df, row_index, pass_number):
     else:
         cbl_df.at[row_index, "match_pass"] = [pass_number]
 
-def pass1(cbl_df, insurer_df):
+def pass1(cbl_df, insurer_df, tolerance=100):
     logger.info("\n=== Pass 1: Matching by Placing Number and Amount ===")
     total_records = len(cbl_df)
     exact_matches = 0
@@ -225,7 +225,7 @@ def pass1(cbl_df, insurer_df):
             
             # Check individual matches first
             for j, amt2 in zip(insurer_indices, insurer_amounts):
-                if -100 <= (amt1 + amt2) <= 100:
+                if -tolerance <= (amt1 + amt2) <= tolerance:
                     exact_match_indices = [j]
                     break
         
@@ -241,7 +241,7 @@ def pass1(cbl_df, insurer_df):
             combination_partial_count = len(available_indices)
             
             # Smart selection: limit to 50 most promising items
-            max_items_to_consider = 50
+            max_items_to_consider = 20
             target = -amt1  # We want sum(insurer_amounts) to be close to -amt1
             
             if len(available_indices) > max_items_to_consider:
@@ -266,7 +266,7 @@ def pass1(cbl_df, insurer_df):
                 for combination in combinations(zip(limited_indices, limited_amounts), r):
                     combination_indices, combination_amounts = zip(*combination)
                     total_amount = sum(combination_amounts)
-                    if -100 <= (amt1 + total_amount) <= 100:
+                    if -tolerance <= (amt1 + total_amount) <= tolerance:
                         combination_match_indices = list(combination_indices)
                         logger.info(f"Record {i}: Found combination match with {r} items, total: {total_amount}")
                         break
@@ -284,7 +284,7 @@ def pass1(cbl_df, insurer_df):
                 'cbl_index': i,
                 'match_type': 'exact',
                 'insurer_indices': exact_match_indices,
-                'match_reason': 'Placing + Amount',
+                'match_reason': 'Placing Number + Single Amount Match',
                 'fallback_indices': [idx for idx in insurer_indices if idx not in exact_match_indices]
             })
         elif combination_match_indices is not None:
@@ -292,18 +292,29 @@ def pass1(cbl_df, insurer_df):
                 'cbl_index': i,
                 'match_type': 'combination',
                 'insurer_indices': combination_match_indices,
-                'match_reason': 'Placing + Amount',
+                'match_reason': 'Placing Number + Cumulative Amount Match',
                 'fallback_indices': [idx for idx in insurer_indices if idx not in combination_match_indices]
             })
         elif not insurer_matches.empty:
-            # Partial match
-            potential_matches.append({
-                'cbl_index': i,
-                'match_type': 'partial',
-                'insurer_indices': insurer_indices,
-                'match_reason': 'Placing only',
-                'fallback_indices': insurer_indices
-            })
+            # Only create partial match if there are some valid matches (even if not perfect)
+            # Check if any insurer amounts are within a reasonable range (e.g., within 10x tolerance)
+            reasonable_matches = []
+            for idx, amt in zip(insurer_indices, insurer_amounts):
+                # Check if the amount is within a reasonable range (not completely different)
+                if pd.notna(amt) and abs(amt1 + amt) <= tolerance * 10:  # 10x tolerance for partial matches
+                    reasonable_matches.append(idx)
+            
+            if reasonable_matches:
+                # Partial match - there are some reasonable matches
+                potential_matches.append({
+                    'cbl_index': i,
+                    'match_type': 'partial',
+                    'insurer_indices': reasonable_matches,
+                    'match_reason': 'Placing Number Match (Amount mismatch)',
+                    'fallback_indices': reasonable_matches
+                })
+            # If no reasonable matches, don't create any match (will be No Match)
+            # This ensures that only rows with actual reasonable matches are flagged as Partial Match
 
     # Phase 2: Resolve conflicts by prioritizing combination matches
     logger.info("\n=== Phase 2: Resolving conflicts and applying matches ===")
@@ -333,7 +344,7 @@ def pass1(cbl_df, insurer_df):
             if available_indices:
                 partial_matches += 1
                 cbl_df.at[cbl_index, "match_status"] = "Partial Match"
-                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']} (conflict resolved)"
+                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
                 cbl_df.at[cbl_index, "matched_insurer_indices"] = available_indices
                 cbl_df.at[cbl_index, "matched_amtdue_total"] = insurer_df.loc[available_indices, "Amount_Clean_INSURER"].tolist()
                 cbl_df.at[cbl_index, "partial_candidates_indices"] = available_indices
@@ -343,13 +354,13 @@ def pass1(cbl_df, insurer_df):
                 # All potential indices are already used - mark as No Match
                 logger.info(f"Record {cbl_index}: All potential indices used by other records - marking as No Match")
                 cbl_df.at[cbl_index, "match_status"] = "No Match"
-                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']} (all indices used by other records)"
+                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
                 cbl_df.at[cbl_index, "matched_insurer_indices"] = []
                 cbl_df.at[cbl_index, "matched_amtdue_total"] = None
                 cbl_df.at[cbl_index, "partial_candidates_indices"] = []
         else:
             # Apply the match
-            if match_type in ['exact', 'combination']:
+            if match_type == 'exact':
                 exact_matches += 1
                 cbl_df.at[cbl_index, "match_status"] = "Exact Match"
                 cbl_df.at[cbl_index, "match_reason"] = match['match_reason']
@@ -358,6 +369,40 @@ def pass1(cbl_df, insurer_df):
                 cbl_df.at[cbl_index, "partial_candidates_indices"] = match['fallback_indices']
                 cbl_df.at[cbl_index, "match_resolved_in_pass"] = 1
                 used_insurer_indices.update(insurer_indices)
+            elif match_type == 'combination':
+                # Combination matches should be treated as partial matches if there are conflicts
+                # Check if any of the insurer indices are already used
+                conflicting_indices = set(insurer_indices) & used_insurer_indices
+                if conflicting_indices:
+                    # Mark as partial match with remaining available indices
+                    available_indices = [idx for idx in insurer_indices if idx not in used_insurer_indices]
+                    if available_indices:
+                        partial_matches += 1
+                        cbl_df.at[cbl_index, "match_status"] = "Partial Match"
+                        cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
+                        cbl_df.at[cbl_index, "matched_insurer_indices"] = available_indices
+                        cbl_df.at[cbl_index, "matched_amtdue_total"] = insurer_df.loc[available_indices, "Amount_Clean_INSURER"].tolist()
+                        cbl_df.at[cbl_index, "partial_candidates_indices"] = available_indices
+                        cbl_df.at[cbl_index, "partial_resolved_in_pass"] = 1
+                        used_insurer_indices.update(available_indices)
+                    else:
+                        # All potential indices are already used - mark as No Match
+                        logger.info(f"Record {cbl_index}: All potential indices used by other records - marking as No Match")
+                        cbl_df.at[cbl_index, "match_status"] = "No Match"
+                        cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
+                        cbl_df.at[cbl_index, "matched_insurer_indices"] = []
+                        cbl_df.at[cbl_index, "matched_amtdue_total"] = None
+                        cbl_df.at[cbl_index, "partial_candidates_indices"] = []
+                else:
+                    # No conflicts - apply as exact match
+                    exact_matches += 1
+                    cbl_df.at[cbl_index, "match_status"] = "Exact Match"
+                    cbl_df.at[cbl_index, "match_reason"] = match['match_reason']
+                    cbl_df.at[cbl_index, "matched_insurer_indices"] = insurer_indices
+                    cbl_df.at[cbl_index, "matched_amtdue_total"] = sum(insurer_df.loc[insurer_indices, "Amount_Clean_INSURER"])
+                    cbl_df.at[cbl_index, "partial_candidates_indices"] = match['fallback_indices']
+                    cbl_df.at[cbl_index, "match_resolved_in_pass"] = 1
+                    used_insurer_indices.update(insurer_indices)
             else:  # partial
                 partial_matches += 1
                 cbl_df.at[cbl_index, "match_status"] = "Partial Match"
@@ -459,6 +504,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95):
         cbl_amt = row["Amount_Clean"]
 
         matched_indices = []
+        name_scores = []
 
         for j, insurer_row in fallback_rows.iterrows():
             insurer_name = str(insurer_row["ClientName_INSURER"]).upper().strip()
@@ -478,17 +524,26 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95):
 
             if policy_match and name_score >= name_threshold:
                 matched_indices.append(j)
+                name_scores.append(name_score)
 
         total_amt = fallback_rows.loc[matched_indices, "Amount_Clean_INSURER"].sum()
+        highest_name_score = max(name_scores) if name_scores else 0
 
-        if matched_indices and -100 <= (cbl_amt + total_amt) <= 100:
+        if matched_indices and -tolerance <= (cbl_amt + total_amt) <= tolerance:
             # Exact match found
+            # Determine if it's single or cumulative amount match
+            if len(matched_indices) == 1:
+                amount_match_type = 'Single Amount Match'
+            else:
+                amount_match_type = 'Cumulative Amount Match'
+            
             potential_matches.append({
                 'cbl_index': i,
                 'match_type': 'exact',
                 'insurer_indices': matched_indices,
-                'match_reason': 'Policy + Name + Cumulative Amount',
-                'total_amount': total_amt
+                'match_reason': f'Policy + Name Match (CS: {highest_name_score}%) + {amount_match_type}',
+                'total_amount': total_amt,
+                'name_score': highest_name_score
             })
         elif matched_indices:
             # Partial match found
@@ -496,8 +551,9 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95):
                 'cbl_index': i,
                 'match_type': 'partial',
                 'insurer_indices': matched_indices,
-                'match_reason': 'Policy + Name match only (Amount mismatch)',
-                'total_amount': None
+                'match_reason': f'Policy + Name Match (CS: {highest_name_score}%) (Amount mismatch)',
+                'total_amount': None,
+                'name_score': highest_name_score
             })
 
     # Phase 2: Resolve conflicts and apply matches
@@ -528,7 +584,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95):
             if available_indices:
                 partial_matches += 1
                 cbl_df.at[cbl_index, "match_status"] = "Partial Match"
-                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']} (conflict resolved)"
+                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
                 cbl_df.at[cbl_index, "matched_insurer_indices"] = available_indices
                 cbl_df.at[cbl_index, "matched_amtdue_total"] = fallback_rows.loc[available_indices, "Amount_Clean_INSURER"].tolist()
                 cbl_df.at[cbl_index, "partial_candidates_indices"] = []
@@ -538,7 +594,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95):
                 # All potential indices are already used - mark as No Match
                 logger.info(f"Pass 2 Record {cbl_index}: All potential indices used by other records - marking as No Match")
                 cbl_df.at[cbl_index, "match_status"] = "No Match"
-                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']} (all indices used by other records)"
+                cbl_df.at[cbl_index, "match_reason"] = f"{match['match_reason']}"
                 cbl_df.at[cbl_index, "matched_insurer_indices"] = []
                 cbl_df.at[cbl_index, "matched_amtdue_total"] = None
                 cbl_df.at[cbl_index, "partial_candidates_indices"] = []
@@ -637,6 +693,10 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
                 cbl_total = cbl_df.loc[cbl_indices, 'Amount_Clean'].sum()
                 insurer_total = available_insurer.loc[insurer_indices, 'Amount_Clean_INSURER'].sum()
                 difference = cbl_total + insurer_total
+
+       
+                # print("insurer_total --> ", insurer_total)
+                # print("difference --> ", difference)
                 
                 if -tolerance <= difference <= tolerance:
                     group_matches.append({
@@ -652,16 +712,37 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
     
     logger.info(f"Found {len(group_matches)} potential group matches")
     
+    # Debug: Log details about group matching
+    logger.info(f"DEBUG: CBL groups found: {len(cbl_groups)}")
+    logger.info(f"DEBUG: Insurer groups found: {len(insurer_groups)}")
+    multi_cbl_groups = {k: v for k, v in cbl_groups.items() if len(v) > 1}
+    multi_insurer_groups = {k: v for k, v in insurer_groups.items() if len(v) > 1}
+    logger.info(f"DEBUG: CBL groups with multiple rows: {len(multi_cbl_groups)}")
+    logger.info(f"DEBUG: Insurer groups with multiple rows: {len(multi_insurer_groups)}")
+    
+    if group_matches:
+        logger.info(f"DEBUG: First few group matches:")
+        for i, match in enumerate(group_matches[:3]):
+            logger.info(f"  {i+1}. {match['cbl_name'][:30]}... -> {match['insurer_name'][:30]}... (Score: {match['name_score']}%)")
+    else:
+        logger.info("DEBUG: No group matches found - checking why...")
+        if multi_cbl_groups and multi_insurer_groups:
+            logger.info(f"DEBUG: Sample CBL groups: {list(multi_cbl_groups.keys())[:3]}")
+            logger.info(f"DEBUG: Sample insurer groups: {list(multi_insurer_groups.keys())[:3]}")
+        else:
+            logger.info(f"DEBUG: No multi-row groups found - CBL: {len(multi_cbl_groups)}, Insurer: {len(multi_insurer_groups)}")
+    
     # Add group matches to potential matches
     for match in group_matches:
         potential_matches.append({
             'match_type': 'group',
             'cbl_indices': match['cbl_indices'],
             'insurer_indices': match['insurer_indices'],
-            'match_reason': f'Group Match: {len(match["cbl_indices"])} CBL + {len(match["insurer_indices"])} Insurer (Total: {match["cbl_total"]:.2f} + {match["insurer_total"]:.2f} = {match["difference"]:.2f})',
+            'match_reason': f'Name Group Match (CS: {match["name_score"]}%)',
             'cbl_total': match['cbl_total'],
             'insurer_total': match['insurer_total'],
-            'difference': match['difference']
+            'difference': match['difference'],
+            'name_score': match['name_score']
         })
     
     # Now process remaining unmatched records with traditional row-by-row and cumulative matching
@@ -698,7 +779,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
         
         # First: Try row-by-row matching
         for idx, amt in zip(matching_rows.index, matching_amounts):
-            if idx not in processed_rows and pd.notna(amt) and -100 <= (cbl_amt + amt) <= 100:
+            if idx not in processed_rows and pd.notna(amt) and -tolerance <= (cbl_amt + amt) <= tolerance:
                 matched_indices.append(idx)
                 processed_rows.add(idx)
         
@@ -708,27 +789,40 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
             unprocessed_amounts = matching_amounts[unprocessed_indices]
             # Filter out NaN values before summing
             valid_amounts = unprocessed_amounts[unprocessed_amounts.notna()]
+            print("valid_amounts --> ", valid_amounts)
+
             if not valid_amounts.empty:
                 total_unprocessed_amount = valid_amounts.sum()
+
+                print("total_unprocessed_amount --> ", total_unprocessed_amount)
+                print("cbl_amt --> ", cbl_amt)
+                print("difference --> ", cbl_amt + total_unprocessed_amount)
                 
-                if -100 <= (cbl_amt + total_unprocessed_amount) <= 100:
+                if -tolerance <= (cbl_amt + total_unprocessed_amount) <= tolerance:
+                    print('YESSSS MATCHED')
                     matched_indices.extend(unprocessed_indices)
                     processed_rows.update(unprocessed_indices)
         
         # Add to potential matches
         if matched_indices and cbl_df.at[i, "match_status"] != "Exact Match":
+            # Get the highest name score among the matched indices
+            highest_name_score = name_scores[matched_indices].max()
+            
+            print("matched --> ", cbl_df.loc[matched_indices])
+
             # Determine match reason based on how the match was found
             if len(matched_indices) == 1:
-                match_reason = f"Name Match ≥ {fuzzy_threshold}% + Single Amount Match"
+                match_reason = f"Name Match (CS: {highest_name_score}%) + Single Amount Match"
             else:
-                match_reason = f"Name Match ≥ {fuzzy_threshold}% + Cumulative Amount Match"
+                match_reason = f"Name Match (CS: {highest_name_score}%) + Cumulative Amount Match"
             
             potential_matches.append({
                 'match_type': 'exact',
                 'cbl_index': i,
                 'insurer_indices': matched_indices,
                 'match_reason': match_reason,
-                'total_amount': sum(insurer_df.loc[matched_indices, "Amount_Clean_INSURER"])
+                'total_amount': sum(insurer_df.loc[matched_indices, "Amount_Clean_INSURER"]),
+                'name_score': highest_name_score
             })
         else:
             # If no exact matches found, mark as partial match with all similar names
@@ -736,12 +830,16 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
             available_partial_indices = [idx for idx in name_matches.index if idx not in partial_used_insurer]
             
             if available_partial_indices:
+                # Get the highest name score among the available partial indices
+                highest_name_score = name_scores[available_partial_indices].max()
+                
                 potential_matches.append({
                     'match_type': 'partial',
                     'cbl_index': i,
                     'insurer_indices': available_partial_indices,
-                    'match_reason': f"Name Match ≥ {fuzzy_threshold}% (Amount mismatch)",
-                    'total_amount': None
+                    'match_reason': f"Name Match (CS: {highest_name_score}%) (Amount mismatch)",
+                    'total_amount': None,
+                    'name_score': highest_name_score
                 })
 
     # Phase 2: Resolve conflicts and apply matches
@@ -766,9 +864,20 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
         
         if conflicting_indices:
             if match_type == 'group':
-                logger.info(f"Pass 3 Group Match: Skipping group match due to conflicts with indices {conflicting_indices}")
-                # For group matches, we can't partially apply them, so we skip entirely
-                continue
+                # For group matches, filter out conflicted indices and apply with available ones
+                available_insurer_indices = [idx for idx in insurer_indices if idx not in used_insurer_indices]
+                
+                if available_insurer_indices:
+                    logger.info(f"Pass 3 Group Match: Applying partial group match with {len(available_insurer_indices)}/{len(insurer_indices)} available insurer indices (conflicts: {conflicting_indices})")
+                    
+                    # Update the match with only available indices
+                    match['insurer_indices'] = available_insurer_indices
+                    # Recalculate totals with available indices
+                    match['insurer_total'] = available_insurer.loc[available_insurer_indices, 'Amount_Clean_INSURER'].sum()
+                    match['difference'] = match['cbl_total'] + match['insurer_total']
+                else:
+                    logger.info(f"Pass 3 Group Match: Skipping group match - all insurer indices already used (conflicts: {conflicting_indices})")
+                    continue
             else:
                 logger.info(f"Pass 3 Record {match['cbl_index']}: Skipping {match_type} match due to conflicts with indices {conflicting_indices}")
                 # Mark as partial match with remaining available indices
@@ -776,7 +885,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
                 if available_indices:
                     partial_matches += 1
                     cbl_df.at[match['cbl_index'], "match_status"] = "Partial Match"
-                    cbl_df.at[match['cbl_index'], "match_reason"] = f"{match['match_reason']} (conflict resolved)"
+                    cbl_df.at[match['cbl_index'], "match_reason"] = f"{match['match_reason']}"
                     cbl_df.at[match['cbl_index'], "matched_insurer_indices"] = available_indices
                     cbl_df.at[match['cbl_index'], "matched_amtdue_total"] = available_insurer.loc[available_indices, "Amount_Clean_INSURER"].tolist()
                     cbl_df.at[match['cbl_index'], "partial_candidates_indices"] = []
@@ -786,22 +895,68 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95):
                     # All potential indices are already used - mark as No Match
                     logger.info(f"Pass 3 Record {match['cbl_index']}: All potential indices used by other records - marking as No Match")
                     cbl_df.at[match['cbl_index'], "match_status"] = "No Match"
-                    cbl_df.at[match['cbl_index'], "match_reason"] = f"{match['match_reason']} (all indices used by other records)"
+                    cbl_df.at[match['cbl_index'], "match_reason"] = f"{match['match_reason']}"
                     cbl_df.at[match['cbl_index'], "matched_insurer_indices"] = []
                     cbl_df.at[match['cbl_index'], "matched_amtdue_total"] = None
                     cbl_df.at[match['cbl_index'], "partial_candidates_indices"] = []
         else:
             # Apply the match
             if match_type == 'group':
-                logger.info(f"Applying group match: {len(match['cbl_indices'])} CBL rows vs {len(match['insurer_indices'])} insurer rows (Total: {match['cbl_total']:.2f} + {match['insurer_total']:.2f} = {match['difference']:.2f})")
+                # Update insurer_indices to reflect any filtering from conflict resolution
+                insurer_indices = match['insurer_indices']
+                logger.info(f"Applying group match: {len(match['cbl_indices'])} CBL rows vs {len(insurer_indices)} insurer rows (Total: {match['cbl_total']:.2f} + {match['insurer_total']:.2f} = {match['difference']:.2f})")
                 
-                # Mark all CBL rows in the group as exact matches
-                for cbl_idx in match['cbl_indices']:
+                # For group matches, we need to distribute the insurer indices among CBL rows
+                # This prevents the same insurer rows from being assigned to multiple CBL rows
+                cbl_indices = match['cbl_indices']
+                
+                # If we have more CBL rows than insurer rows, some CBL rows will share insurer rows
+                # If we have more insurer rows than CBL rows, some insurer rows will be unused
+                # We'll distribute them as evenly as possible
+                
+                # Create a mapping of CBL indices to their assigned insurer indices
+                cbl_to_insurer_mapping = {}
+                
+                if len(cbl_indices) <= len(insurer_indices):
+                    # More insurer rows than CBL rows - distribute insurer rows among CBL rows
+                    for i, cbl_idx in enumerate(cbl_indices):
+                        # Each CBL row gets one insurer row
+                        cbl_to_insurer_mapping[cbl_idx] = [insurer_indices[i]]
+                else:
+                    # More CBL rows than insurer rows - distribute insurer rows as evenly as possible
+                    # Ensure every CBL row gets at least one insurer index
+                    insurer_per_cbl = len(insurer_indices) // len(cbl_indices)
+                    remaining_insurers = len(insurer_indices) % len(cbl_indices)
+                    
+                    # If insurer_per_cbl is 0, we have more CBL rows than insurer rows
+                    # This creates a problematic scenario where we can't properly distribute insurers
+                    # without creating duplicates. We should skip this group match to avoid issues.
+                    if insurer_per_cbl == 0:
+                        # Skip this group match to avoid creating duplicates
+                        logger.warning(f"Skipping group match with {len(cbl_indices)} CBL rows vs {len(insurer_indices)} insurer rows to avoid duplicates")
+                        continue
+                    else:
+                        # Normal distribution
+                        insurer_idx = 0
+                        for i, cbl_idx in enumerate(cbl_indices):
+                            # Calculate how many insurer rows this CBL row should get
+                            num_insurers = insurer_per_cbl + (1 if i < remaining_insurers else 0)
+                            
+                            # Assign the insurer rows
+                            assigned_insurers = insurer_indices[insurer_idx:insurer_idx + num_insurers]
+                            cbl_to_insurer_mapping[cbl_idx] = assigned_insurers
+                            insurer_idx += num_insurers
+                
+                # Apply the matches with proper distribution
+                for cbl_idx in cbl_indices:
                     if cbl_df.at[cbl_idx, 'match_status'] in ['No Match', 'Partial Match']:
+                        assigned_insurer_indices = cbl_to_insurer_mapping[cbl_idx]
+                        assigned_insurer_total = available_insurer.loc[assigned_insurer_indices, "Amount_Clean_INSURER"].sum()
+                        
                         cbl_df.at[cbl_idx, 'match_status'] = 'Exact Match'
                         cbl_df.at[cbl_idx, 'match_reason'] = match['match_reason']
-                        cbl_df.at[cbl_idx, 'matched_insurer_indices'] = match['insurer_indices']
-                        cbl_df.at[cbl_idx, 'matched_amtdue_total'] = match['insurer_total']
+                        cbl_df.at[cbl_idx, 'matched_insurer_indices'] = assigned_insurer_indices
+                        cbl_df.at[cbl_idx, 'matched_amtdue_total'] = assigned_insurer_total
                         cbl_df.at[cbl_idx, 'match_resolved_in_pass'] = 3
                         cbl_df.at[cbl_idx, 'partial_candidates_indices'] = []
                         exact_matches += 1
@@ -945,18 +1100,17 @@ def _process_group_match(group_cbl_rows, insurer_rows, cbl_cols, insurer_cols):
         list: List of combined rows
     """
     combined_rows = []
-    max_rows = max(len(group_cbl_rows), len(insurer_rows))
     
-    for i in range(max_rows):
-        # Get CBL row if available
-        cbl_row = group_cbl_rows[i] if i < len(group_cbl_rows) else None
-        
-        # Get insurer row if available
-        insurer_row = insurer_rows[i] if i < len(insurer_rows) else None
-        
-        # Create combined row
-        combined_row = _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols)
-        combined_rows.append(combined_row)
+    # Only create rows for CBL rows that have corresponding insurer rows
+    # This prevents creating insurer-only rows that cause duplicates
+    for i, cbl_row in enumerate(group_cbl_rows):
+        if i < len(insurer_rows):
+            # Get corresponding insurer row
+            insurer_row = insurer_rows[i]
+            
+            # Create combined row
+            combined_row = _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols)
+            combined_rows.append(combined_row)
     
     return combined_rows
 
@@ -976,6 +1130,12 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
     """
     combined_rows = []
     insurer_indices = _extract_insurer_indices(cbl_row)
+    
+    # If no insurer indices, create a row with only CBL data
+    if not insurer_indices:
+        combined_row = _create_zipped_row(cbl_row, None, cbl_cols, insurer_cols)
+        combined_rows.append(combined_row)
+        return combined_rows
     
     for i, insurer_idx in enumerate(insurer_indices):
         # Get insurer row using DataFrame index directly
@@ -1010,7 +1170,7 @@ def _separate_group_and_individual_matches(cbl_subset):
     
     for _, cbl_row in cbl_subset.iterrows():
         match_reason = cbl_row.get('match_reason', '')
-        if 'Group Match:' in match_reason:
+        if 'Name Group Match:' in match_reason:
             # Use match reason as group key
             group_key = match_reason
             if group_key not in group_matches:
@@ -1075,7 +1235,7 @@ def explode_and_merge(cbl_subset, insurer_df):
     return result_df
 
 
-def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_file=None, output_file='output.xlsx'):
+def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=100):
     """
     Run the matching process between CBL and insurer files.
     
@@ -1083,6 +1243,7 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
         cbl_file (str, optional): Path to the CBL Excel file. If None, will be prompted.
         insurer_file (str, optional): Path to the insurer Excel file. If None, will be prompted.
         output_file (str, optional): Output Excel file name. Defaults to 'output.xlsx'.
+        tolerance (int, optional): Tolerance for amount matching. Defaults to 100.
     """
     logger.info("\n=== Starting Matching Process ===")
     
@@ -1128,9 +1289,57 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
         # Run additional passes only on unmatched records
         if len(matched_insurer_indices) < len(clean_insurer):
             print("Running additional passes")
-            clean_cbl = pass1(clean_cbl, clean_insurer)
-            clean_cbl = pass2(clean_cbl, clean_insurer)
-            clean_cbl = pass3(clean_cbl, clean_insurer)
+            
+            # Helper function to check if required keys exist in column mappings
+            def has_required_keys(cbl_required, insurer_required):
+                cbl_mappings = column_mappings.get('cbl_mappings', {})
+                insurer_mappings = column_mappings.get('insurer_mappings', {})
+                
+                # Check if all required CBL keys are mapped
+                cbl_has_keys = all(any(target == key for target in cbl_mappings.values()) for key in cbl_required)
+                
+                # Check if all required insurer keys are mapped
+                insurer_has_keys = all(any(target == key for target in insurer_mappings.values()) for key in insurer_required)
+                
+                return cbl_has_keys and insurer_has_keys
+            
+            # Pass 1: Requires PlacingNo and Amount
+            if has_required_keys(['PlacingNo', 'Amount'], ['PlacingNo', 'Amount']):
+                logger.info("✓ Pass 1: Required keys found in mappings - running Pass 1")
+                clean_cbl = pass1(clean_cbl, clean_insurer, tolerance)
+            else:
+                logger.info("⚠ Pass 1: Required keys (PlacingNo, Amount) not found in mappings - skipping Pass 1")
+            
+            # Pass 2: Requires PolicyNo, ClientName, and Amount (CBL) + ClientName, Amount, and at least one PolicyNo (Insurer)
+            cbl_has_pass2 = has_required_keys(['PolicyNo', 'ClientName', 'Amount'], [])
+            insurer_has_pass2_base = has_required_keys([], ['ClientName', 'Amount'])
+            
+            # Check if insurer has at least one policy number column mapped
+            insurer_mappings = column_mappings.get('insurer_mappings', {})
+            has_policy1 = any(target == 'PolicyNo_1' for target in insurer_mappings.values())
+            has_policy2 = any(target == 'PolicyNo_2' for target in insurer_mappings.values()) 
+            insurer_has_policy = has_policy1 or has_policy2
+            
+            if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
+                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2")
+                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance)
+            else:
+                missing_keys = []
+                if not cbl_has_pass2:
+                    missing_keys.append("CBL: PolicyNo, ClientName, Amount")
+                if not insurer_has_pass2_base:
+                    missing_keys.append("Insurer: ClientName, Amount")
+                if not insurer_has_policy:
+                    missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
+                logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
+            
+            # Pass 3: Requires ClientName and Amount
+            if has_required_keys(['ClientName', 'Amount'], ['ClientName', 'Amount']):
+                logger.info("✓ Pass 3: Required keys found in mappings - running Pass 3")
+                clean_cbl = pass3(clean_cbl, clean_insurer, tolerance)
+            else:
+                logger.info("⚠ Pass 3: Required keys (ClientName, Amount) not found in mappings - skipping Pass 3")
+                
         else:
             print("All records matched via matrix keys - skipping additional passes")
 
@@ -1199,8 +1408,44 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
 
             partial_matches = partial_matches.copy()
             partial_matches["matched_insurer_indices"] = partial_matches.apply(_filter_partial_indices, axis=1)
-            # Drop rows where no partials remain
-            partial_matches = partial_matches[partial_matches["matched_insurer_indices"].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+            
+            # Fix: Check for rows with no insurer data and mark them as No Match
+            def _has_insurer_data(row):
+                insurer_indices = row.get("matched_insurer_indices", [])
+                partial_candidates = row.get("partial_candidates_indices", [])
+                
+                # Check if insurer_indices is not empty
+                has_insurer = (
+                    isinstance(insurer_indices, list) and len(insurer_indices) > 0
+                ) or (
+                    not isinstance(insurer_indices, list) and pd.notna(insurer_indices)
+                )
+                
+                # Check if partial_candidates is not empty
+                has_partial = (
+                    isinstance(partial_candidates, list) and len(partial_candidates) > 0
+                ) or (
+                    not isinstance(partial_candidates, list) and pd.notna(partial_candidates)
+                )
+                
+                return has_insurer or has_partial
+            
+            # Identify rows that should be No Match instead of Partial Match
+            should_be_no_match = partial_matches[~partial_matches.apply(_has_insurer_data, axis=1)]
+            
+            if not should_be_no_match.empty:
+                logger.info(f"Found {len(should_be_no_match)} partial match rows with no insurer data - marking as No Match")
+                for idx in should_be_no_match.index:
+                    partial_matches.at[idx, "match_status"] = "No Match"
+                    logger.info(f"Fixed row {idx}: {partial_matches.at[idx, 'MatrixKey']} - {partial_matches.at[idx, 'match_reason']}")
+                
+                # Move these rows from partial_matches to no_matches
+                fixed_rows = partial_matches[partial_matches["match_status"] == "No Match"].copy()
+                partial_matches = partial_matches[partial_matches["match_status"] == "Partial Match"].copy()
+                no_matches = pd.concat([no_matches, fixed_rows], ignore_index=False)
+            
+            # Don't drop rows where no partials remain - include them as CBL-only rows
+            # This ensures all partial match CBL rows are included in the output
 
         partial_matches = explode_and_merge(partial_matches, clean_insurer)
         # no_matches = explode_and_merge(no_matches, clean_insurer)
@@ -1208,6 +1453,12 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
         # Create unmatched insurer records
         unmatched_insurer = clean_insurer.iloc[list(unmatched_insurer_indices)].copy()
 
+        # Update clean_cbl to reflect the post-processing fixes
+        # This ensures summary statistics are calculated correctly
+        if 'should_be_no_match' in locals() and not should_be_no_match.empty:
+            for idx in should_be_no_match.index:
+                clean_cbl.at[idx, "match_status"] = "No Match"
+        
         # Create separate CBL sheets (without insurer data merged)
         exact_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy()
         partial_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
@@ -1232,8 +1483,8 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                 not_found_insurer_only.to_excel(writer, sheet_name="not found insurer", index=False)
                 
                 # Original combined sheets (for reference)
-                exact_matches.to_excel(writer, sheet_name="Exact Matches Combined", index=False)
-                partial_matches.to_excel(writer, sheet_name="Partial Matches Combined", index=False)
+                exact_matches.to_excel(writer, sheet_name="Exact Matches", index=False)
+                partial_matches.to_excel(writer, sheet_name="Partial Matches", index=False)
                 no_matches.to_excel(writer, sheet_name="No Matches CBL", index=False)
                 unmatched_insurer.to_excel(writer, sheet_name="No Matches Insurer", index=False)
         except Exception as e:
