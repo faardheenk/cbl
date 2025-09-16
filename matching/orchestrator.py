@@ -5,7 +5,7 @@ import argparse
 import logging
 import os
 from matrix import matrix_pass
-from .data_processing import preprocess, initialize_tracking
+from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
 from .output_handler import explode_and_merge
 
@@ -42,14 +42,10 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
     try:
         logger.info(f"Reading files: {cbl_file} and {insurer_file}")
         
-        # Debug: Read raw files first to check original row counts
-        cbl_raw = pd.read_excel(cbl_file)
-        insurer_raw = pd.read_excel(insurer_file)
-        logger.info(f"DEBUG: Raw CBL rows: {len(cbl_raw)}, Raw insurer rows: {len(insurer_raw)}")
-        
-        # Read Excel files with column filtering
-        cbl_df = pd.read_excel(cbl_file, usecols=lambda x: not x.startswith('Unnamed:'))
-        insurer_df = pd.read_excel(insurer_file, usecols=lambda x: not x.startswith('Unnamed:'))
+        # Read Excel files with intelligent header detection and column filtering
+        logger.info("🔍 Using smart header detection for Excel files...")
+        cbl_df = read_excel_with_smart_headers(cbl_file, usecols=lambda x: not str(x).startswith('Unnamed:'))
+        insurer_df = read_excel_with_smart_headers(insurer_file, usecols=lambda x: not str(x).startswith('Unnamed:'))
         
         logger.info(f"DEBUG: After column filtering - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
 
