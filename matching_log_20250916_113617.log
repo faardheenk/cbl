@@ -1,0 +1,39 @@
+2025-09-16 11:36:17,653 - INFO - ============================================================
+2025-09-16 11:36:17,696 - INFO - ============================================================
+2025-09-16 11:36:17,696 - INFO - Features: Global Tracker Integration | Data Integrity Protection | Enhanced Error Handling
+2025-09-16 11:36:17,714 - INFO - 
+=== Starting Matching Process ===
+2025-09-16 11:36:17,714 - INFO - Reading files: data/CBL.xlsx and data/SWAN.xlsx
+2025-09-16 11:36:29,154 - INFO - DEBUG: Raw CBL rows: 2617, Raw insurer rows: 6834
+2025-09-16 11:36:33,417 - INFO - DEBUG: After column filtering - CBL rows: 2617, Insurer rows: 6834
+2025-09-16 11:36:33,429 - INFO - 
+=== Starting Data Preprocessing ===
+2025-09-16 11:36:33,434 - INFO - Successfully renamed CBL columns: ['PlacingNo', 'PolicyNo', 'ClientName', 'Amount', 'PlacingNo', 'PolicyNo', 'Amount', 'Amount', 'Amount', 'ClientName', 'ClientName']
+2025-09-16 11:36:33,434 - INFO - Successfully renamed insurer columns: ['PlacingNo', 'ClientName', 'PolicyNo_1', 'PolicyNo_2', 'Amount', 'PlacingNo', 'PolicyNo_1', 'PolicyNo_1', 'ClientName', 'ClientName', 'Amount', 'Amount']
+2025-09-16 11:36:33,436 - INFO - Available insurer columns after renaming: ['DEBRECID_INSURER', 'PlacingNo_INSURER', 'DTRETURN_INSURER', 'CLIENT_INSURER', 'ClientName_INSURER', 'ACCYY_INSURER', 'ACCMM_INSURER', 'PolicyNo_1_INSURER', 'POLRSK_INSURER', 'POLCD_INSURER', 'PolicyNo_2_INSURER', 'AGENCY_INSURER', 'DATEFROM_INSURER', 'DATETO_INSURER', '"RECEIPT/JV"_INSURER', 'CURRENCY_INSURER', 'DEBAMT_INSURER', 'ALLOCAMT_INSURER', 'Amount_INSURER', 'Remarks_INSURER', 'SOA_INSURER', 'string matching_INSURER']
+2025-09-16 11:36:33,436 - INFO - DEBUG: Before data cleaning - CBL rows: 2617, Insurer rows: 6834
+2025-09-16 11:36:33,442 - ERROR - 
+Error: 'DataFrame' object has no attribute 'str'
+2025-09-16 11:36:33,442 - ERROR - ============================================================
+2025-09-16 11:36:33,501 - ERROR - ============================================================
+2025-09-16 11:36:33,501 - ERROR - Error: 'DataFrame' object has no attribute 'str'
+2025-09-16 11:36:33,501 - ERROR - Full traceback:
+2025-09-16 11:36:33,506 - ERROR - Traceback (most recent call last):
+  File "C:\Users\faardheenk\dev\city-brokers-multipass-py\run_enhanced_matching.py", line 175, in main
+    results = run_matching_process(
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\faardheenk\dev\city-brokers-multipass-py\matching\orchestrator.py", line 61, in run_matching_process
+    clean_cbl, clean_insurer = preprocess(cbl_df, insurer_df, column_mappings, matrix_keys)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\faardheenk\dev\city-brokers-multipass-py\matching\data_processing.py", line 116, in preprocess
+    cbl_df["PlacingNo_Clean"] = cbl_df["PlacingNo"].str.upper().str.strip()
+                                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\faardheenk\AppData\Local\miniconda3\Lib\site-packages\pandas\core\generic.py", line 6299, in __getattr__
+    return object.__getattribute__(self, name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'DataFrame' object has no attribute 'str'. Did you mean: 'std'?
+
+2025-09-16 11:36:33,506 - INFO - 1. Verify input files exist and are accessible
+2025-09-16 11:36:33,506 - INFO - 2. Check column mappings match actual file columns
+2025-09-16 11:36:33,506 - INFO - 3. Ensure sufficient disk space for output file
+2025-09-16 11:36:33,521 - INFO - 4. Verify file permissions for reading/writing

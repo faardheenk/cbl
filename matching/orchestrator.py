@@ -6,7 +6,7 @@ import logging
 import os
 from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking
-from .matching_engine import pass1, pass2, pass3
+from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
 from .output_handler import explode_and_merge
 
 logger = logging.getLogger(__name__)
@@ -63,12 +63,22 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
         
         logger.info(f"DEBUG: After preprocessing - CBL rows: {len(clean_cbl)}, Insurer rows: {len(clean_insurer)}")
 
-        # Run matching passes
-        clean_cbl, clean_insurer, matched_insurer_indices = matrix_pass(clean_cbl, clean_insurer, matrix_keys)
+        # Initialize comprehensive global match tracker for consistent behavior across all passes
+        global_tracker = GlobalMatchTracker()
+        logger.info("🔧 Initialized GlobalMatchTracker for comprehensive CBL-insurer match tracking")
+        
+        # Run matrix pass with global tracker integration
+        clean_cbl, clean_insurer, matched_insurer_indices = matrix_pass(clean_cbl, clean_insurer, matrix_keys, global_tracker)
+        
+        # Log matrix pass results (global tracker is already updated by matrix_pass)
+        if matched_insurer_indices:
+            logger.info(f"🎯 Matrix pass matched {len(matched_insurer_indices)} insurer rows with full global tracking")
+        else:
+            logger.info("🎯 Matrix pass completed - no matches found")
 
         # Run additional passes only on unmatched records
         if len(matched_insurer_indices) < len(clean_insurer):
-            print("Running additional passes")
+            logger.info(f"🚀 Running additional passes with global tracking")
             
             # Helper function to check if required keys exist in column mappings
             def has_required_keys(cbl_required, insurer_required):
@@ -85,10 +95,14 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             
             # Pass 1: Requires PlacingNo and Amount
             if has_required_keys(['PlacingNo', 'Amount'], ['PlacingNo', 'Amount']):
-                logger.info("✓ Pass 1: Required keys found in mappings - running Pass 1")
-                clean_cbl = pass1(clean_cbl, clean_insurer, tolerance)
+                logger.info("✓ Pass 1: Required keys found in mappings - running Pass 1 with global tracking")
+                clean_cbl = pass1(clean_cbl, clean_insurer, tolerance, global_tracker)
             else:
                 logger.info("⚠ Pass 1: Required keys (PlacingNo, Amount) not found in mappings - skipping Pass 1")
+            
+            # Log global tracker status after Pass 1
+            if global_tracker:
+                logger.info(f"📊 After Pass 1: {global_tracker.get_usage_summary()}")
             
             # Pass 2: Requires PolicyNo, ClientName, and Amount (CBL) + ClientName, Amount, and at least one PolicyNo (Insurer)
             cbl_has_pass2 = has_required_keys(['PolicyNo', 'ClientName', 'Amount'], [])
@@ -101,8 +115,8 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             insurer_has_policy = has_policy1 or has_policy2
             
             if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
-                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2")
-                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance)
+                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking")
+                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
                 missing_keys = []
                 if not cbl_has_pass2:
@@ -113,12 +127,22 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                     missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
                 logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
             
+            # Log global tracker status after Pass 2
+            if global_tracker:
+                logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
+            
             # Pass 3: Requires ClientName and Amount
             if has_required_keys(['ClientName', 'Amount'], ['ClientName', 'Amount']):
-                logger.info("✓ Pass 3: Required keys found in mappings - running Pass 3")
-                clean_cbl = pass3(clean_cbl, clean_insurer, tolerance)
+                logger.info("✓ Pass 3: Required keys found in mappings - running Pass 3 with global tracking")
+                clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
                 logger.info("⚠ Pass 3: Required keys (ClientName, Amount) not found in mappings - skipping Pass 3")
+            
+            # Log final global tracker status
+            if global_tracker:
+                final_summary = global_tracker.get_usage_summary()
+                logger.info(f"🎯 Final Global Tracker Summary: {final_summary}")
+                logger.info(f"✅ Total unique insurer rows used: {final_summary['total_unique_insurer_used']}/{len(clean_insurer)} ({final_summary['total_unique_insurer_used']/len(clean_insurer)*100:.1f}%)")
                 
         else:
             print("All records matched via matrix keys - skipping additional passes")
