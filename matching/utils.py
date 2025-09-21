@@ -20,24 +20,111 @@ def add_pass(cbl_df, row_index, pass_number):
 
 
 def extract_policy_tokens(policy_str):
-    """Extract policy tokens from a policy string."""
+    """Extract policy tokens from a policy string with simple and effective approach."""
     if pd.isna(policy_str):
         return []
     
     policy_str = str(policy_str).strip()
     
-    # If it contains multiple '/' characters, just remove special characters
-    if policy_str.count('/') > 1:
-         # Split by spaces and clean each token
-        tokens = policy_str.split()
-        return [re.sub(r'[^a-zA-Z0-9]', '', token) for token in tokens]
+    if not policy_str:
+        return []
     
-    # If it's a pure number (no letters, no special characters), keep it as is
+    # Strategy 1: If it's a pure number, keep it as is (but check minimum length)
     if policy_str.isdigit():
-        return [policy_str]
+        if len(policy_str) >= 4:  # Minimum 4 characters for numbers
+            return [policy_str]
+        else:
+            return []
     
-    # For all other cases, extract 4-5 digit numbers
-    return re.findall(r'\b\d{4,5}\b', policy_str)
+    # Strategy 2: For clean policy numbers, split on spaces and process each part
+    # This handles cases like: "102901 2092 0902 PYTH" or "DNH018AC012999 PYHO24LI000903"
+    space_parts = policy_str.split()
+    tokens = []
+    
+    for part in space_parts:
+        # Clean the part of any remaining symbols
+        cleaned_part = re.sub(r'[^a-zA-Z0-9]', '', part)
+        
+        if cleaned_part and len(cleaned_part) >= 4:  # Minimum 4 characters
+            tokens.append(cleaned_part.upper())
+    
+    # Special case: If we have a single part with '/' characters, combine it into one token
+    # This handles cases like "ABC/DEF/123/456" -> "ABCDEF123456"
+    if len(space_parts) == 1 and '/' in policy_str:
+        combined_token = re.sub(r'[^a-zA-Z0-9]', '', policy_str)
+        if len(combined_token) >= 4:
+            return [combined_token.upper()]
+    
+    # Strategy 3: If we didn't get good results from space splitting, try reconstruction
+    # This handles cases like: "PY HO 24LI 000 903 DN H0 18AC 012 999" and "DN-H0-18AC/012/999"
+    if len(tokens) < 2 or any(len(token) < 8 for token in tokens) or (len(tokens) >= 3 and all(len(token) < 10 for token in tokens)):
+        # Get all alphanumeric parts from the original string
+        alphanumeric_parts = re.findall(r'[A-Z0-9]+', policy_str.upper())
+        
+        # Find letter-only parts (potential policy code starts)
+        letter_parts = [part for part in alphanumeric_parts if re.match(r'^[A-Z]+$', part)]
+        
+        if len(letter_parts) >= 1:  # Changed from >= 2 to >= 1
+            reconstructed_tokens = []
+            
+            # Build policy codes by combining each letter part with following parts
+            for i, letter_part in enumerate(letter_parts):
+                # Find this letter part in the original list
+                letter_index = alphanumeric_parts.index(letter_part)
+                
+                # Collect parts starting from this letter part
+                policy_parts = [letter_part]
+                j = letter_index + 1
+                
+                # Look for the next letter part to know when to stop
+                next_letter_index = len(alphanumeric_parts)
+                if i + 1 < len(letter_parts):
+                    next_letter_part = letter_parts[i + 1]
+                    try:
+                        next_letter_index = alphanumeric_parts.index(next_letter_part)
+                    except ValueError:
+                        next_letter_index = len(alphanumeric_parts)
+                
+                # Collect all parts until the next letter part
+                while j < next_letter_index and j < len(alphanumeric_parts):
+                    policy_parts.append(alphanumeric_parts[j])
+                    j += 1
+                
+                # Create the policy code
+                policy_code = ''.join(policy_parts)
+                if len(policy_code) >= 6:
+                    reconstructed_tokens.append(policy_code)
+            
+            # Use reconstructed tokens if they're better
+            if len(reconstructed_tokens) > len(tokens):
+                tokens = reconstructed_tokens
+            elif len(reconstructed_tokens) == 1 and len(tokens) > 1:
+                # If reconstruction gives us 1 token and we have multiple short tokens, prefer reconstruction
+                tokens = reconstructed_tokens
+    
+    # Strategy 4: Fallback - extract any remaining meaningful patterns
+    if len(tokens) < 2:
+        # Extract 4+ digit numbers
+        numbers = re.findall(r'\b\d{4,}\b', policy_str)
+        tokens.extend(numbers)
+        
+        # Extract alphanumeric patterns
+        alpha_numeric = re.findall(r'\b[A-Z]{2,}\d+[A-Z0-9]*\b', policy_str.upper())
+        tokens.extend(alpha_numeric)
+        
+        # Extract mixed alphanumeric codes
+        mixed_codes = re.findall(r'\b[A-Z0-9]{4,}\b', policy_str.upper())
+        tokens.extend(mixed_codes)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_tokens = []
+    for token in tokens:
+        if token and token not in seen:
+            seen.add(token)
+            unique_tokens.append(token)
+    
+    return unique_tokens
 
 
 def oriupdate_others_after_upgrade(cbl_df, upgraded_row_index, used_insurer_indices):

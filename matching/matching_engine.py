@@ -893,8 +893,8 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
 
 
 def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=None):
-    """Pass 2: Matching by Policy Number and Name."""
-    logger.info("\n=== Pass 2: Matching by Policy Number and Name ===")
+    """Pass 2: Matching by Policy Number and Amount (Name matching removed)."""
+    logger.info("\n=== Pass 2: Matching by Policy Number and Amount ===")
     total_records = len(cbl_df[cbl_df["match_status"].isin(["No Match", "Partial Match"])])
     exact_matches = 0
     partial_matches = 0
@@ -936,35 +936,36 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
             logger.info(f"Progress: {processed}/{total_records} records processed")
 
         add_pass(cbl_df, i, 2)
-        tokens = extract_policy_tokens(row["PolicyNo"])
-        cbl_name = str(row["ClientName"]).upper().strip()
+        tokens = extract_policy_tokens(row["PolicyNo_Clean"])
         cbl_amt = row["Amount_Clean"]
 
         matched_indices = []
-        name_scores = []
 
         for j, insurer_row in fallback_rows.iterrows():
-            insurer_name = str(insurer_row["ClientName_INSURER"]).upper().strip()
-            name_score = fuzz.partial_ratio(cbl_name, insurer_name)
+            # Collect all available policy values for this insurer row
+            insurer_policy_values = []
             
-            # Check PolicyNo_1 match (only if it's not empty)
-            policy_no_1_match = False
-            if pd.notna(insurer_row["PolicyNo_Clean_INSURER"]) and insurer_row["PolicyNo_Clean_INSURER"]:
-                policy_no_1_match = insurer_row["PolicyNo_Clean_INSURER"] in tokens
+            # Add PolicyNo_1 if available
+            if pd.notna(insurer_row.get("PolicyNo_Clean_INSURER")) and str(insurer_row["PolicyNo_Clean_INSURER"]).strip():
+                insurer_policy_values.append(str(insurer_row["PolicyNo_Clean_INSURER"]).strip())
             
-            # Check PolicyNo_2 match (only if it exists and is not empty)
-            policy_no_2_match = False
-            if "PolicyNo_2_Clean_INSURER" in insurer_row.index and pd.notna(insurer_row["PolicyNo_2_Clean_INSURER"]) and insurer_row["PolicyNo_2_Clean_INSURER"]:
-                policy_no_2_match = insurer_row["PolicyNo_2_Clean_INSURER"] in tokens
+            # Add PolicyNo_2 if available
+            if "PolicyNo_2_Clean_INSURER" in insurer_row.index:
+                if pd.notna(insurer_row["PolicyNo_2_Clean_INSURER"]) and str(insurer_row["PolicyNo_2_Clean_INSURER"]).strip():
+                    insurer_policy_values.append(str(insurer_row["PolicyNo_2_Clean_INSURER"]).strip())
             
-            policy_match = policy_no_1_match or policy_no_2_match
+            # Simple policy matching - check if any insurer policy is in CBL tokens
+            policy_match = False
+            for insurer_policy in insurer_policy_values:
+                if insurer_policy in tokens:
+                    policy_match = True
+                    logger.debug(f"Pass 2 CBL {i}: Policy match found - '{insurer_policy}' in tokens {tokens}")
+                    break
 
-            if policy_match and name_score >= name_threshold:
+            if policy_match:
                 matched_indices.append(j)
-                name_scores.append(name_score)
 
         total_amt = fallback_rows.loc[matched_indices, "Amount_Clean_INSURER"].sum()
-        highest_name_score = max(name_scores) if name_scores else 0
 
         if matched_indices:
             # Classify the amount match using graduated confidence levels
@@ -976,9 +977,12 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
             else:
                 amount_match_type = 'Cumulative Amount Match'
             
+            # Simple policy match info
+            policy_strategy_info = " (Policy Match)"
+            
             if match_type in ["PERFECT_MATCH", "EXACT_MATCH"]:
                 # Exact match found
-                match_reason = f'Policy + Name Match (CS: {highest_name_score}%) + {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
+                match_reason = f'Policy Number{policy_strategy_info} + {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
                 potential_matches.append({
                     'cbl_index': i,
                     'match_type': 'exact',
@@ -986,12 +990,11 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     'match_reason': match_reason,
                     'confidence_level': confidence,
                     'amount_difference': difference,
-                    'total_amount': total_amt,
-                    'name_score': highest_name_score
+                    'total_amount': total_amt
                 })
             elif match_type == "CLOSE_MATCH":
                 # Close match - treat as exact but with medium confidence
-                match_reason = f'Policy + Name Match (CS: {highest_name_score}%) + Close {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
+                match_reason = f'Policy Number{policy_strategy_info} + Close {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
                 potential_matches.append({
                     'cbl_index': i,
                     'match_type': 'exact',  # Still treat as exact for processing
@@ -999,12 +1002,11 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     'match_reason': match_reason,
                     'confidence_level': confidence,
                     'amount_difference': difference,
-                    'total_amount': total_amt,
-                    'name_score': highest_name_score
+                    'total_amount': total_amt
                 })
             elif match_type in ["REVIEW_REQUIRED", "INVESTIGATION_REQUIRED"]:
                 # Partial match found
-                match_reason = f'Policy + Name Match (CS: {highest_name_score}%) + {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
+                match_reason = f'Policy Number{policy_strategy_info} + {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
                 potential_matches.append({
                     'cbl_index': i,
                     'match_type': 'partial',
@@ -1012,8 +1014,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     'match_reason': match_reason,
                     'confidence_level': confidence,
                     'amount_difference': difference,
-                    'total_amount': total_amt,
-                    'name_score': highest_name_score
+                    'total_amount': total_amt
                 })
             # If NO_MATCH, don't add to potential matches
 

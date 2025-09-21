@@ -514,7 +514,48 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         cbl_df["Amount_Clean"] = pd.to_numeric(cbl_df["Amount"], errors="coerce")
         
     if "PolicyNo" in cbl_df.columns:
-        cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo"].astype(str).str.split(".").str[0]
+        # Enhanced policy number cleaning with duplicate handling
+        cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo"].astype(str).str.strip()
+        
+        # Handle decimal removal and symbol cleaning to preserve duplicates
+        def clean_policy_decimals(policy_str):
+            if pd.isna(policy_str) or str(policy_str).strip() == "":
+                return ""
+            
+            # Split on spaces first to handle multiple policy numbers
+            parts = str(policy_str).strip().split()
+            cleaned_parts = []
+            
+            for part in parts:
+                # Remove .0 suffix but preserve other decimals
+                if part.endswith('.0'):
+                    cleaned_part = part[:-2]
+                else:
+                    # Split on decimal and take first part only if it looks like Excel decimal artifact
+                    if '.' in part:
+                        before_dot, after_dot = part.split('.', 1)
+                        # If after decimal is just digits, likely Excel artifact
+                        if after_dot.isdigit():
+                            cleaned_part = before_dot
+                        else:
+                            cleaned_part = part  # Keep original
+                    else:
+                        cleaned_part = part
+                
+                # Remove ALL symbols and special characters, keep only alphanumeric
+                cleaned_part = re.sub(r'[^a-zA-Z0-9]', '', cleaned_part)
+                
+                # Only keep meaningful parts (at least 2 characters)
+                if len(cleaned_part) >= 2:
+                    cleaned_parts.append(cleaned_part.upper())
+            
+            return ' '.join(cleaned_parts)
+        
+        cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo"].apply(clean_policy_decimals)
+        
+        # Remove common prefixes/suffixes and normalize
+        cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo_Clean"].str.replace(r'^[Nn][Aa][Nn]$', '', regex=True)
+        cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo_Clean"].str.replace(r'^\s*$', '', regex=True)
         cbl_df["PolicyNo_Clean"] = cbl_df["PolicyNo_Clean"].fillna("")
         
     if "ClientName" in cbl_df.columns:
@@ -527,8 +568,45 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         insurer_df["PlacingNo_Clean_INSURER"] = insurer_df["PlacingNo_Clean_INSURER"].str.replace(pattern, '', regex=True)
     
     if "PolicyNo_1_INSURER" in insurer_df.columns:
-        insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_1_INSURER"].astype(str).str.split(".").str[0]
-        # Replace NaN values with empty string
+        # Enhanced policy number cleaning for insurer with duplicate handling and symbol removal
+        def clean_policy_decimals(policy_str):
+            if pd.isna(policy_str) or str(policy_str).strip() == "":
+                return ""
+            
+            # Split on spaces first to handle multiple policy numbers
+            parts = str(policy_str).strip().split()
+            cleaned_parts = []
+            
+            for part in parts:
+                # Remove .0 suffix but preserve other decimals
+                if part.endswith('.0'):
+                    cleaned_part = part[:-2]
+                else:
+                    # Split on decimal and take first part only if it looks like Excel decimal artifact
+                    if '.' in part:
+                        before_dot, after_dot = part.split('.', 1)
+                        # If after decimal is just digits, likely Excel artifact
+                        if after_dot.isdigit():
+                            cleaned_part = before_dot
+                        else:
+                            cleaned_part = part  # Keep original
+                    else:
+                        cleaned_part = part
+                
+                # Remove ALL symbols and special characters, keep only alphanumeric
+                cleaned_part = re.sub(r'[^a-zA-Z0-9]', '', cleaned_part)
+                
+                # Only keep meaningful parts (at least 2 characters)
+                if len(cleaned_part) >= 2:
+                    cleaned_parts.append(cleaned_part.upper())
+            
+            return ' '.join(cleaned_parts)
+        
+        insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_1_INSURER"].apply(clean_policy_decimals)
+        
+        # Remove common prefixes/suffixes and normalize
+        insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_Clean_INSURER"].str.replace(r'^[Nn][Aa][Nn]$', '', regex=True)
+        insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_Clean_INSURER"].str.replace(r'^\s*$', '', regex=True)
         insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_Clean_INSURER"].fillna("")
     
     if "Amount_INSURER" in insurer_df.columns:
@@ -538,8 +616,45 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
     
     # Handle optional PolicyNo_2 column dynamically
     if "PolicyNo_2_INSURER" in insurer_df.columns:
-        insurer_df["PolicyNo_2_Clean_INSURER"] = insurer_df["PolicyNo_2_INSURER"].astype(str)
-        # Replace NaN values with empty string
+        # Enhanced policy number cleaning for PolicyNo_2 with duplicate handling and symbol removal
+        def clean_policy_decimals_2(policy_str):
+            if pd.isna(policy_str) or str(policy_str).strip() == "":
+                return ""
+            
+            # Split on spaces first to handle multiple policy numbers
+            parts = str(policy_str).strip().split()
+            cleaned_parts = []
+            
+            for part in parts:
+                # Remove .0 suffix but preserve other decimals
+                if part.endswith('.0'):
+                    cleaned_part = part[:-2]
+                else:
+                    # Split on decimal and take first part only if it looks like Excel decimal artifact
+                    if '.' in part:
+                        before_dot, after_dot = part.split('.', 1)
+                        # If after decimal is just digits, likely Excel artifact
+                        if after_dot.isdigit():
+                            cleaned_part = before_dot
+                        else:
+                            cleaned_part = part  # Keep original
+                    else:
+                        cleaned_part = part
+                
+                # Remove ALL symbols and special characters, keep only alphanumeric
+                cleaned_part = re.sub(r'[^a-zA-Z0-9]', '', cleaned_part)
+                
+                # Only keep meaningful parts (at least 2 characters)
+                if len(cleaned_part) >= 2:
+                    cleaned_parts.append(cleaned_part.upper())
+            
+            return ' '.join(cleaned_parts)
+        
+        insurer_df["PolicyNo_2_Clean_INSURER"] = insurer_df["PolicyNo_2_INSURER"].apply(clean_policy_decimals_2)
+        
+        # Remove common prefixes/suffixes and normalize
+        insurer_df["PolicyNo_2_Clean_INSURER"] = insurer_df["PolicyNo_2_Clean_INSURER"].str.replace(r'^[Nn][Aa][Nn]$', '', regex=True)
+        insurer_df["PolicyNo_2_Clean_INSURER"] = insurer_df["PolicyNo_2_Clean_INSURER"].str.replace(r'^\s*$', '', regex=True)
         insurer_df["PolicyNo_2_Clean_INSURER"] = insurer_df["PolicyNo_2_Clean_INSURER"].fillna("")
     else:
         # Create empty PolicyNo_2 column if it doesn't exist (some matching passes may expect it)

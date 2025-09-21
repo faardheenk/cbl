@@ -100,9 +100,9 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             if global_tracker:
                 logger.info(f"📊 After Pass 1: {global_tracker.get_usage_summary()}")
             
-            # Pass 2: Requires PolicyNo, ClientName, and Amount (CBL) + ClientName, Amount, and at least one PolicyNo (Insurer)
-            cbl_has_pass2 = has_required_keys(['PolicyNo', 'ClientName', 'Amount'], [])
-            insurer_has_pass2_base = has_required_keys([], ['ClientName', 'Amount'])
+            # Pass 2: Requires PolicyNo and Amount (CBL) + Amount and at least one PolicyNo (Insurer) - Name matching removed
+            cbl_has_pass2 = has_required_keys(['PolicyNo', 'Amount'], [])
+            insurer_has_pass2_base = has_required_keys([], ['Amount'])
             
             # Check if insurer has at least one policy number column mapped
             insurer_mappings = column_mappings.get('insurer_mappings', {})
@@ -111,14 +111,14 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             insurer_has_policy = has_policy1 or has_policy2
             
             if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
-                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking")
+                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking (Name matching removed)")
                 clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
                 missing_keys = []
                 if not cbl_has_pass2:
-                    missing_keys.append("CBL: PolicyNo, ClientName, Amount")
+                    missing_keys.append("CBL: PolicyNo, Amount")
                 if not insurer_has_pass2_base:
-                    missing_keys.append("Insurer: ClientName, Amount")
+                    missing_keys.append("Insurer: Amount")
                 if not insurer_has_policy:
                     missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
                 logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
