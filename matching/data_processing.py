@@ -305,6 +305,22 @@ def _read_single_sheet_with_smart_headers(file_path, sheet_name, **kwargs):
     # Remove completely empty rows
     df = df.dropna(how='all')
     
+    # Trim leading and trailing whitespaces from column names
+    if len(df.columns) > 0:
+        original_columns = list(df.columns)
+        df.columns = [str(col).strip() if pd.notna(col) else col for col in df.columns]
+        
+        # Log if any column names were trimmed
+        trimmed_columns = []
+        for orig, new in zip(original_columns, df.columns):
+            if str(orig) != str(new):
+                trimmed_columns.append(f"'{orig}' -> '{new}'")
+        
+        if trimmed_columns:
+            logger.info(f"🧹 Trimmed whitespaces from column names:")
+            for trimmed in trimmed_columns:
+                logger.info(f"   {trimmed}")
+    
     return df
 
 def _group_mergeable_sheets(sheet_data, sheet_headers):
@@ -439,9 +455,31 @@ def create_dynamic_column_mappings(cbl_columns, insurer_columns, custom_mappings
         if 'insurer_mappings' in custom_mappings:
             insurer_mappings.update(custom_mappings['insurer_mappings'])
     
-    # Filter to only include mappings where source columns exist
-    filtered_cbl_mappings = {k: v for k, v in cbl_mappings.items() if k in cbl_columns}
-    filtered_insurer_mappings = {k: v for k, v in insurer_mappings.items() if k in insurer_columns}
+    # Helper function to find matching column with case-insensitive and whitespace-tolerant matching
+    def find_matching_column(target_col, available_columns):
+        """Find a matching column in available_columns that matches target_col (case-insensitive, whitespace-tolerant)."""
+        target_clean = str(target_col).strip().lower()
+        for col in available_columns:
+            if str(col).strip().lower() == target_clean:
+                return col
+        return None
+    
+    # Filter to only include mappings where source columns exist (with smart matching)
+    filtered_cbl_mappings = {}
+    for k, v in cbl_mappings.items():
+        matching_col = find_matching_column(k, cbl_columns)
+        if matching_col:
+            filtered_cbl_mappings[matching_col] = v
+            if str(k) != str(matching_col):
+                logger.info(f"🔗 CBL mapping: '{k}' -> '{matching_col}' (matched with whitespace/case tolerance)")
+    
+    filtered_insurer_mappings = {}
+    for k, v in insurer_mappings.items():
+        matching_col = find_matching_column(k, insurer_columns)
+        if matching_col:
+            filtered_insurer_mappings[matching_col] = v
+            if str(k) != str(matching_col):
+                logger.info(f"🔗 Insurer mapping: '{k}' -> '{matching_col}' (matched with whitespace/case tolerance)")
     
     logger.info(f"Dynamic CBL mappings: {filtered_cbl_mappings}")
     logger.info(f"Dynamic insurer mappings: {filtered_insurer_mappings}")

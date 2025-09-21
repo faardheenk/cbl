@@ -463,7 +463,7 @@ def _apply_no_match(cbl_df, cbl_index, match_reason):
     cbl_df.at[cbl_index, "partial_candidates_indices"] = []
 
 
-def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices, tolerance, pass_number, global_tracker=None, fallback_rows=None):
+def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices, tolerance, pass_number, global_tracker, fallback_rows=None):
     """
     Handle conflict resolution with fallback logic.
     
@@ -471,10 +471,10 @@ def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices,
         cbl_df: CBL dataframe
         insurer_df: Insurer dataframe (or fallback_rows for Pass 2)
         match: Match dictionary with conflict
-        used_insurer_indices: Set of already used insurer indices (legacy - use global_tracker instead)
+        used_insurer_indices: Unused parameter (kept for compatibility)
         tolerance: Tolerance for amount matching
         pass_number: Which pass is calling this function
-        global_tracker: GlobalInsurerTracker instance for consistent tracking
+        global_tracker: GlobalMatchTracker instance for consistent tracking
         fallback_rows: Optional fallback rows dataframe (for Pass 2)
         
     Returns:
@@ -486,40 +486,26 @@ def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices,
     
     logger.info(f"Pass {pass_number} Record {cbl_index}: Handling conflicts for {match_type} match")
     
-    # Use global tracker if available, otherwise fall back to legacy logic
-    if global_tracker:
-        # Check availability based on match type
+    # Use GlobalMatchTracker for conflict resolution
+    # Check availability based on match type
+    if match_type in ['exact', 'combination']:
+        can_use_all, available_indices, unavailable_indices = global_tracker.can_use_for_exact(insurer_indices)
+    else:  # partial
+        can_use_all, available_indices, unavailable_indices = global_tracker.can_use_for_partial(insurer_indices)
+    
+    if unavailable_indices:
+        logger.info(f"Record {cbl_index}: Some indices unavailable: {unavailable_indices}")
+    
+    # Try fallback indices if original indices are not available
+    if not available_indices and 'fallback_indices' in match and match['fallback_indices']:
+        logger.info(f"Record {cbl_index}: Trying fallback indices: {match['fallback_indices']}")
         if match_type in ['exact', 'combination']:
-            can_use_all, available_indices, unavailable_indices = global_tracker.can_use_for_exact(insurer_indices)
-        else:  # partial
-            can_use_all, available_indices, unavailable_indices = global_tracker.can_use_for_partial(insurer_indices)
+            can_use_fallback, available_indices, _ = global_tracker.can_use_for_exact(match['fallback_indices'])
+        else:
+            can_use_fallback, available_indices, _ = global_tracker.can_use_for_partial(match['fallback_indices'])
         
-        if unavailable_indices:
-            logger.info(f"Record {cbl_index}: Some indices unavailable: {unavailable_indices}")
-        
-        # Try fallback indices if original indices are not available
-        if not available_indices and 'fallback_indices' in match and match['fallback_indices']:
-            logger.info(f"Record {cbl_index}: Trying fallback indices: {match['fallback_indices']}")
-            if match_type in ['exact', 'combination']:
-                can_use_fallback, available_indices, _ = global_tracker.can_use_for_exact(match['fallback_indices'])
-            else:
-                can_use_fallback, available_indices, _ = global_tracker.can_use_for_partial(match['fallback_indices'])
-            
-            if available_indices:
-                logger.info(f"Record {cbl_index}: Using available fallback indices: {available_indices}")
-    else:
-        # Legacy logic for backwards compatibility
-        available_indices = []
-        if 'fallback_indices' in match and match['fallback_indices']:
-            available_fallback = [idx for idx in match['fallback_indices'] if idx not in used_insurer_indices]
-            if available_fallback:
-                logger.info(f"Record {cbl_index}: Using fallback indices {available_fallback}")
-                available_indices = available_fallback
-        
-        if not available_indices:
-            available_indices = [idx for idx in insurer_indices if idx not in used_insurer_indices]
-            if available_indices:
-                logger.info(f"Record {cbl_index}: Using remaining original indices {available_indices}")
+        if available_indices:
+            logger.info(f"Record {cbl_index}: Using available fallback indices: {available_indices}")
     
     if not available_indices:
         # All potential indices are already used - mark as No Match
@@ -537,15 +523,11 @@ def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices,
     if -tolerance <= (cbl_amount + total_available_amount) <= tolerance:
         # Upgrade to exact match!
         logger.info(f"Record {cbl_index}: Fallback indices upgraded to Exact Match!")
-        if not global_tracker:
-            used_insurer_indices.update(available_indices)
         return _apply_exact_match(cbl_df, cbl_index, f"{match['match_reason']} (Fallback Match)", 
                                  available_indices, total_available_amount, [], pass_number, global_tracker), 0
     else:
         # Apply as partial match
         logger.info(f"Record {cbl_index}: Fallback indices as Partial Match")
-        if not global_tracker:
-            used_insurer_indices.update(available_indices)
         return 0, _apply_partial_match(cbl_df, cbl_index, f"{match['match_reason']} (Fallback Partial)",
                                       available_indices, total_available_amount, pass_number, global_tracker)
 
@@ -557,10 +539,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
     exact_matches = 0
     partial_matches = 0
     
-    if global_tracker:
-        logger.info(f"Pass 1 starting with global tracker: {global_tracker.get_usage_summary()}")
-    else:
-        logger.warning("Pass 1 running without global tracker - legacy mode")
+    logger.info(f"Pass 1 starting with global tracker: {global_tracker.get_usage_summary()}")
 
     # Pre-compute string conversions for performance optimization
     logger.info("Pre-computing insurer placing strings for substring matching...")
@@ -673,14 +652,14 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                         }
                         break
                     elif match_type == "CLOSE_MATCH" and best_match is None:
-                        # Consider close matches if no exact match found
+                        # Consider close matches as partial matches
                         # Include overlap info if this came from substring matching
                         overlap_info = overlap_details.get(j, "")
                         overlap_suffix = f" ({overlap_info})" if overlap_info else ""
                         
                         best_match = {
                             'indices': [j],
-                            'type': 'close', 
+                            'type': 'partial', 
                             'confidence': confidence,
                             'difference': difference,
                             'reason': f'Placing Number{overlap_suffix} + Close Amount Match ({confidence} Confidence, Diff: ${difference:.2f})'
@@ -692,11 +671,18 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                 exact_match_confidence = best_match['confidence']
                 exact_match_difference = best_match['difference']
                 exact_match_reason = best_match['reason']
+            elif best_match and best_match['type'] == 'partial':
+                # Close match should be treated as partial match
+                exact_match_indices = None
+                # Store the close match for later processing as partial
+                close_match_info = best_match
             else:
                 exact_match_indices = None
+                close_match_info = None
         
         # Second comparison - combinations (smart selection)
         combination_match_indices = None
+        combination_is_close_match = False
         combination_partial_count = 0
         if not insurer_matches.empty and exact_match_indices is None:
             # Only try combinations if no exact match was found
@@ -759,6 +745,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                             combination_match_indices = list(combination_indices)
                             combination_match_confidence = confidence
                             combination_match_difference = difference
+                            combination_is_close_match = True
                             
                             # Include overlap info if any of the combination items came from substring matching
                             overlap_infos = [overlap_details.get(idx, "") for idx in combination_indices if overlap_details.get(idx, "")]
@@ -787,9 +774,15 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                 'fallback_indices': [idx for idx in insurer_indices if idx not in exact_match_indices]
             })
         elif combination_match_indices is not None:
+            # Determine if combination match should be exact or partial based on whether it was a close match
+            if combination_is_close_match:
+                match_type_to_use = 'partial'
+            else:
+                match_type_to_use = 'combination'
+            
             potential_matches.append({
                 'cbl_index': i,
-                'match_type': 'combination',
+                'match_type': match_type_to_use,
                 'insurer_indices': combination_match_indices,
                 'match_reason': combination_match_reason,
                 'confidence_level': combination_match_confidence,
@@ -837,6 +830,18 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                 })
             # If no reasonable matches, don't create any match (will be No Match)
             # This ensures that only rows with actual reasonable matches are flagged as Partial Match
+        
+        # Handle close match as partial match if no exact or combination match was found
+        if 'close_match_info' in locals() and close_match_info is not None and exact_match_indices is None and combination_match_indices is None:
+            potential_matches.append({
+                'cbl_index': i,
+                'match_type': 'partial',
+                'insurer_indices': close_match_info['indices'],
+                'match_reason': close_match_info['reason'],
+                'confidence_level': close_match_info['confidence'],
+                'amount_difference': close_match_info['difference'],
+                'fallback_indices': [idx for idx in insurer_indices if idx not in close_match_info['indices']]
+            })
 
     # Phase 2: Resolve conflicts by prioritizing combination matches
     logger.info("\n=== Phase 2: Resolving conflicts and applying matches ===")
@@ -848,21 +853,21 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
         -len(x['insurer_indices'])  # Negative for descending order (larger combinations first)
     ))
     
-    # Track used insurer indices
-    used_insurer_indices = set()
-    
+    # Use GlobalMatchTracker for consistent tracking
     for match in potential_matches:
         cbl_index = match['cbl_index']
         match_type = match['match_type']
         insurer_indices = match['insurer_indices']
         
-        # Check if any of the insurer indices are already used
-        conflicting_indices = set(insurer_indices) & used_insurer_indices
+        # Use GlobalMatchTracker for conflict detection
+        can_claim_all, available_indices, conflicts = global_tracker.can_cbl_claim_insurer(
+            cbl_index, insurer_indices, 'exact' if match_type in ['exact', 'combination'] else 'partial'
+        )
         
-        if conflicting_indices:
+        if conflicts:
             # Use helper function for conflict resolution
             exact_added, partial_added = _handle_conflict_resolution(
-                cbl_df, insurer_df, match, used_insurer_indices, tolerance, 1, global_tracker
+                cbl_df, insurer_df, match, None, tolerance, 1, global_tracker
             )
             exact_matches += exact_added
             partial_matches += partial_added
@@ -876,8 +881,6 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
             else:  # partial
                 total_amount = insurer_df.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
                 partial_matches += _apply_partial_match(
@@ -885,14 +888,12 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
 
     logger.info(f"✓ Pass 1 complete: {exact_matches} exact matches, {partial_matches} partial matches")
     return cbl_df
 
 
-def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=None):
+def pass2(cbl_df, insurer_df, tolerance=100, global_tracker=None):
     """Pass 2: Matching by Policy Number and Amount (Name matching removed)."""
     logger.info("\n=== Pass 2: Matching by Policy Number and Amount ===")
     total_records = len(cbl_df[cbl_df["match_status"].isin(["No Match", "Partial Match"])])
@@ -900,32 +901,22 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
     partial_matches = 0
     processed = 0
     
-    if global_tracker:
-        logger.info(f"Pass 2 starting with global tracker: {global_tracker.get_usage_summary()}")
-    else:
-        logger.warning("Pass 2 running without global tracker - legacy mode")
+    logger.info(f"Pass 2 starting with global tracker: {global_tracker.get_usage_summary()}")
 
-    # Track which insurer rows have been used for partial matches
-    partial_used_insurer_indices = set()
-    
-    # Get all insurer indices that have been used for partial matches in previous passes
-    for indices in cbl_df[cbl_df["match_status"] == "Partial Match"]["matched_insurer_indices"]:
-        if isinstance(indices, list):
-            partial_used_insurer_indices.update(indices)
-        elif pd.notna(indices):
-            partial_used_insurer_indices.add(indices)
-
+    # Use GlobalMatchTracker to get available fallback indices
     fallback_index_pool = set()
-
     for i, row in cbl_df.iterrows():
         fallback = row.get("partial_candidates_indices")
         if isinstance(fallback, list):
             fallback_index_pool.update(fallback)
-
-    # Filter out insurer indices that have already been used for partial matches
-    available_fallback_indices = fallback_index_pool - partial_used_insurer_indices
+    
+    # Filter out indices that are already used (exact, matrix, or partial)
+    all_used_indices = (global_tracker.exact_used_insurer | 
+                       global_tracker.matrix_used_insurer | 
+                       global_tracker.partial_used_insurer)
+    available_fallback_indices = fallback_index_pool - all_used_indices
     fallback_rows = insurer_df.loc[list(available_fallback_indices)]
-    logger.info(f"Found {len(available_fallback_indices)} potential matches from Pass 1 (excluding already used partial matches)")
+    logger.info(f"Found {len(available_fallback_indices)} potential matches from Pass 1 (GlobalMatchTracker filtering)")
 
     # Phase 1: Collect all potential matches without applying them yet
     potential_matches = []
@@ -993,11 +984,11 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     'total_amount': total_amt
                 })
             elif match_type == "CLOSE_MATCH":
-                # Close match - treat as exact but with medium confidence
+                # Close match - treat as partial match
                 match_reason = f'Policy Number{policy_strategy_info} + Close {amount_match_type} ({confidence} Confidence, Diff: ${difference:.2f})'
                 potential_matches.append({
                     'cbl_index': i,
-                    'match_type': 'exact',  # Still treat as exact for processing
+                    'match_type': 'partial',  # Treat as partial match
                     'insurer_indices': matched_indices,
                     'match_reason': match_reason,
                     'confidence_level': confidence,
@@ -1028,21 +1019,21 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
         -len(x['insurer_indices'])  # Negative for descending order (larger combinations first)
     ))
     
-    # Track used insurer indices
-    used_insurer_indices = set()
-    
+    # Use GlobalMatchTracker for consistent tracking
     for match in potential_matches:
         cbl_index = match['cbl_index']
         match_type = match['match_type']
         insurer_indices = match['insurer_indices']
         
-        # Check if any of the insurer indices are already used
-        conflicting_indices = set(insurer_indices) & used_insurer_indices
+        # Use GlobalMatchTracker for conflict detection
+        can_claim_all, available_indices, conflicts = global_tracker.can_cbl_claim_insurer(
+            cbl_index, insurer_indices, 'exact' if match_type == 'exact' else 'partial'
+        )
         
-        if conflicting_indices:
+        if conflicts:
             # Use helper function for conflict resolution
             exact_added, partial_added = _handle_conflict_resolution(
-                cbl_df, insurer_df, match, used_insurer_indices, tolerance, 2, global_tracker, fallback_rows
+                cbl_df, insurer_df, match, None, tolerance, 2, global_tracker, fallback_rows
             )
             exact_matches += exact_added
             partial_matches += partial_added
@@ -1055,10 +1046,6 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
-                
-                # Note: CBL row updates are handled automatically by GlobalMatchTracker
             else:  # partial
                 total_amount = fallback_rows.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
                 partial_matches += _apply_partial_match(
@@ -1066,8 +1053,6 @@ def pass2(cbl_df, insurer_df, tolerance=100, name_threshold=95, global_tracker=N
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
 
     logger.info(f"✓ Pass 2 complete: {exact_matches} exact matches, {partial_matches} partial matches")
     return cbl_df
@@ -1081,40 +1066,17 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
     partial_matches = 0
     processed = 0
     
-    if global_tracker:
-        logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
-    else:
-        logger.warning("Pass 3 running without global tracker - legacy mode")
+    logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
 
-    # Use global tracker for consistent filtering, or fall back to legacy logic
-    if global_tracker:
-        # With global tracker, we can trust its state for filtering
-        already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
-        available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
-        logger.info(f"Pass 3: Using global tracker - excluding {len(already_matched_insurer)} already used insurer rows")
-        
-        # Also get partial used insurer indices for compatibility
-        partial_used_insurer = global_tracker.partial_used_insurer.copy()
-    else:
-        # Legacy logic for backwards compatibility
-        already_matched_insurer = set()
-        for indices in cbl_df[cbl_df["match_status"] == "Exact Match"]["matched_insurer_indices"]:
-            if isinstance(indices, list):
-                already_matched_insurer.update(indices)
-            elif pd.notna(indices):
-                already_matched_insurer.add(indices)
-        
-        # Get indices of insurer rows that have been used for partial matches
-        partial_used_insurer = set()
-        for indices in cbl_df[cbl_df["match_status"] == "Partial Match"]["matched_insurer_indices"]:
-            if isinstance(indices, list):
-                partial_used_insurer.update(indices)
-            elif pd.notna(indices):
-                partial_used_insurer.add(indices)
-
-        # Filter out insurer rows already used in exact matches. We allow using rows that
-        # are currently in partial matches, because step 3 may upgrade them to exact.
-        available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
+    # Use global tracker for consistent filtering
+    # For Pass 3, we exclude exact and matrix matches but allow partial matches to be upgraded
+    already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
+    available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
+    logger.info(f"Pass 3: Using global tracker - excluding {len(already_matched_insurer)} exact/matrix used insurer rows")
+    logger.info(f"Pass 3: Allowing {len(global_tracker.partial_used_insurer)} partial matches to be upgraded")
+    
+    # Also get partial used insurer indices for compatibility
+    partial_used_insurer = global_tracker.partial_used_insurer.copy()
     
     # Pre-calculate name scores for all insurer rows
     insurer_names = available_insurer["ClientName_INSURER"].fillna("").str.upper().str.strip()
@@ -1323,8 +1285,16 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                 confidence_to_use = final_confidence
                 difference_to_use = final_difference
             
+            # Determine if this should be exact or partial based on whether it was a close match
+            if 'match_confidence' in locals():
+                # This was a close match, treat as partial
+                match_type_to_use = 'partial'
+            else:
+                # This was an exact match
+                match_type_to_use = 'exact'
+            
             potential_matches.append({
-                'match_type': 'exact',
+                'match_type': match_type_to_use,
                 'cbl_index': i,
                 'insurer_indices': matched_indices,
                 'match_reason': match_reason,
@@ -1382,36 +1352,41 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
         -len(x['insurer_indices'])  # Negative for descending order (larger groups first)
     ))
     
-    # Track used insurer indices
-    used_insurer_indices = set()
-    
+    # Use GlobalMatchTracker for consistent tracking
     for match in potential_matches:
         match_type = match['match_type']
         insurer_indices = match['insurer_indices']
         
-        # Check if any of the insurer indices are already used
-        conflicting_indices = set(insurer_indices) & used_insurer_indices
+        # Use GlobalMatchTracker for conflict detection
+        if match_type == 'group':
+            # For group matches, we need to check each CBL index individually
+            cbl_indices = match['cbl_indices']
+            has_conflicts = False
+            for cbl_idx in cbl_indices:
+                can_claim_all, available_indices, conflicts = global_tracker.can_cbl_claim_insurer(
+                    cbl_idx, insurer_indices, 'exact'
+                )
+                if conflicts:
+                    has_conflicts = True
+                    break
+        else:
+            # For individual matches
+            cbl_index = match['cbl_index']
+            can_claim_all, available_indices, conflicts = global_tracker.can_cbl_claim_insurer(
+                cbl_index, insurer_indices, 'exact' if match_type == 'exact' else 'partial'
+            )
+            has_conflicts = bool(conflicts)
         
-        if conflicting_indices:
+        if has_conflicts:
             if match_type == 'group':
-                # For group matches, filter out conflicted indices and apply with available ones
-                available_insurer_indices = [idx for idx in insurer_indices if idx not in used_insurer_indices]
-                
-                if available_insurer_indices:
-                    logger.info(f"Pass 3 Group Match: Applying partial group match with {len(available_insurer_indices)}/{len(insurer_indices)} available insurer indices (conflicts: {conflicting_indices})")
-                    
-                    # Update the match with only available indices
-                    match['insurer_indices'] = available_insurer_indices
-                    # Recalculate totals with available indices
-                    match['insurer_total'] = available_insurer.loc[available_insurer_indices, 'Amount_Clean_INSURER'].sum()
-                    match['difference'] = match['cbl_total'] + match['insurer_total']
-                else:
-                    logger.info(f"Pass 3 Group Match: Skipping group match - all insurer indices already used (conflicts: {conflicting_indices})")
-                    continue
+                # For group matches, we need to handle conflicts more carefully
+                # Since we already validated conflicts above, we'll skip this group match
+                logger.info(f"Pass 3 Group Match: Skipping group match due to conflicts with GlobalMatchTracker")
+                continue
             else:
                 # Use helper function for conflict resolution (non-group matches)
                 exact_added, partial_added = _handle_conflict_resolution(
-                    cbl_df, available_insurer, match, used_insurer_indices, tolerance, 3, global_tracker
+                    cbl_df, available_insurer, match, None, tolerance, 3, global_tracker
                 )
                 exact_matches += exact_added
                 partial_matches += partial_added
@@ -1463,10 +1438,26 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                             cbl_to_insurer_mapping[cbl_idx] = assigned_insurers
                             insurer_idx += num_insurers
                 
-                # Apply the matches with proper distribution
+                # Apply the matches with proper distribution and validation
                 for cbl_idx in cbl_indices:
                     if cbl_df.at[cbl_idx, 'match_status'] in ['No Match', 'Partial Match']:
                         assigned_insurer_indices = cbl_to_insurer_mapping[cbl_idx]
+                        
+                        # Validate with GlobalMatchTracker before applying
+                        if global_tracker:
+                            can_claim_all, available_indices, conflicts = global_tracker.can_cbl_claim_insurer(
+                                cbl_idx, assigned_insurer_indices, 'exact'
+                            )
+                            
+                            if not can_claim_all:
+                                logger.warning(f"Pass 3 Group Match: CBL {cbl_idx} cannot claim all assigned insurer indices due to conflicts: {conflicts}")
+                                # Use only available indices
+                                assigned_insurer_indices = available_indices
+                                
+                                if not assigned_insurer_indices:
+                                    logger.error(f"Pass 3 Group Match: CBL {cbl_idx} has no available insurer indices - skipping")
+                                    continue
+                        
                         assigned_insurer_total = available_insurer.loc[assigned_insurer_indices, "Amount_Clean_INSURER"].sum()
                         
                         cbl_df.at[cbl_idx, 'match_status'] = 'Exact Match'
@@ -1478,15 +1469,13 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                         exact_matches += 1
                 
                 # Mark insurer indices as used in global tracker
-                if global_tracker:
-                    # For group matches, we need to mark each CBL-insurer pair individually
-                    for cbl_idx in cbl_indices:
-                        assigned_insurer_indices = cbl_to_insurer_mapping[cbl_idx]
+                # For group matches, we need to mark each CBL-insurer pair individually
+                for cbl_idx in cbl_indices:
+                    assigned_insurer_indices = cbl_to_insurer_mapping[cbl_idx]
+                    if assigned_insurer_indices:  # Only if we have valid indices
                         success, _, _, affected = global_tracker.mark_exact_match(cbl_idx, assigned_insurer_indices, cbl_df)
                         if not success:
                             logger.error(f"Pass 3 Group Match: Failed to mark exact match for CBL {cbl_idx}")
-                else:
-                    used_insurer_indices.update(match['insurer_indices'])
                 
             elif match_type == 'exact':
                 exact_matches += _apply_exact_match(
@@ -1495,10 +1484,6 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
-                
-                # Note: CBL row updates are handled automatically by GlobalMatchTracker
                 
             else:  # partial
                 total_amount = available_insurer.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
@@ -1507,8 +1492,6 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                     confidence_level=match.get('confidence_level'),
                     amount_difference=match.get('amount_difference')
                 )
-                if not global_tracker:
-                    used_insurer_indices.update(insurer_indices)
 
     logger.info(f"✓ Pass 3 complete: {exact_matches} exact matches, {partial_matches} partial matches (including improved group matching)")
     return cbl_df

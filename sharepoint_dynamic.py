@@ -8,7 +8,7 @@ import logging
 import re
 import pandas as pd
 from matching.orchestrator import run_matching_process
-from matching.data_processing import create_dynamic_column_mappings
+from matching.data_processing import create_dynamic_column_mappings, read_excel_with_smart_headers
 import datetime
 
 # Configure logging
@@ -136,10 +136,10 @@ class SharePointService:
                 logger.warning(f"⚠️ Could not get SharePoint mappings for {insurer_name}: {str(e)}")
                 logger.info("Will use pure dynamic detection instead")
             
-            # Step 2: Read files to analyze column structure
-            logger.info(f"📊 Analyzing file structure...")
-            cbl_df = pd.read_excel(cbl_file_path)
-            insurer_df = pd.read_excel(insurer_file_path)
+            # Step 2: Read files to analyze column structure with smart header detection
+            logger.info(f"📊 Analyzing file structure with smart header detection...")
+            cbl_df = read_excel_with_smart_headers(cbl_file_path)
+            insurer_df = read_excel_with_smart_headers(insurer_file_path)
             
             cbl_columns = list(cbl_df.columns)
             insurer_columns = list(insurer_df.columns)
@@ -172,9 +172,9 @@ class SharePointService:
             
             # Fallback to pure dynamic detection if everything fails
             try:
-                logger.info("🔄 Falling back to pure dynamic detection...")
-                cbl_df = pd.read_excel(cbl_file_path)
-                insurer_df = pd.read_excel(insurer_file_path)
+                logger.info("🔄 Falling back to pure dynamic detection with smart headers...")
+                cbl_df = read_excel_with_smart_headers(cbl_file_path)
+                insurer_df = read_excel_with_smart_headers(insurer_file_path)
                 
                 fallback_mappings = create_dynamic_column_mappings(
                     cbl_columns=list(cbl_df.columns),

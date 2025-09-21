@@ -112,7 +112,7 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             
             if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
                 logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking (Name matching removed)")
-                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
+                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, global_tracker)
             else:
                 missing_keys = []
                 if not cbl_has_pass2:
@@ -254,8 +254,58 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
 
     partial_matches = explode_and_merge(partial_matches, clean_insurer)
 
-    # Create unmatched insurer records
-    unmatched_insurer = clean_insurer.iloc[list(unmatched_insurer_indices)].copy()
+    # Create unmatched insurer records with robust index handling
+    try:
+        # Get current DataFrame indices
+        current_insurer_indices = set(clean_insurer.index)
+        
+        # Recalculate matched indices based on current DataFrame state
+        # Use the original approach but with current DataFrame
+        current_exact_match_indices = set()
+        current_partial_match_indices = set()
+        
+        # Collect insurer indices from exact matches in the current CBL DataFrame
+        exact_match_cbl = clean_cbl[clean_cbl["match_status"] == "Exact Match"]
+        for indices in exact_match_cbl["matched_insurer_indices"]:
+            if isinstance(indices, list):
+                current_exact_match_indices.update(indices)
+            elif pd.notna(indices):
+                current_exact_match_indices.add(indices)
+        
+        # Collect insurer indices from partial matches in the current CBL DataFrame
+        partial_match_cbl = clean_cbl[clean_cbl["match_status"] == "Partial Match"]
+        for indices in partial_match_cbl["matched_insurer_indices"]:
+            if isinstance(indices, list):
+                current_partial_match_indices.update(indices)
+            elif pd.notna(indices):
+                current_partial_match_indices.add(indices)
+        
+        # Remove exact matches from partial matches to avoid double counting
+        current_partial_match_indices = current_partial_match_indices - current_exact_match_indices
+        
+        # Calculate current matched and unmatched indices
+        current_matched_indices = current_exact_match_indices | current_partial_match_indices
+        current_unmatched_indices = current_insurer_indices - current_matched_indices
+        
+        logger.info(f"Index reconciliation:")
+        logger.info(f"  - Original unmatched indices: {len(unmatched_insurer_indices)}")
+        logger.info(f"  - Current DataFrame indices: {len(current_insurer_indices)}")
+        logger.info(f"  - Current exact match indices: {len(current_exact_match_indices)}")
+        logger.info(f"  - Current partial match indices: {len(current_partial_match_indices)}")
+        logger.info(f"  - Current matched indices: {len(current_matched_indices)}")
+        logger.info(f"  - Current unmatched indices: {len(current_unmatched_indices)}")
+        
+        if current_unmatched_indices:
+            unmatched_insurer = clean_insurer.loc[list(current_unmatched_indices)].copy()
+        else:
+            unmatched_insurer = pd.DataFrame()
+            logger.info("No unmatched insurer records found")
+            
+    except Exception as e:
+        logger.error(f"Error accessing unmatched insurer indices: {str(e)}")
+        logger.info(f"clean_insurer shape: {clean_insurer.shape}")
+        logger.info(f"clean_insurer index range: {clean_insurer.index.min()} to {clean_insurer.index.max()}")
+        unmatched_insurer = pd.DataFrame()
 
     # Update clean_cbl to reflect the post-processing fixes
     # This ensures summary statistics are calculated correctly
@@ -268,10 +318,28 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
     partial_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
     no_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
 
-    # Create separate insurer sheets
-    exact_match_insurer_only = clean_insurer.iloc[list(exact_match_insurer_indices)].copy()
-    partial_match_insurer_only = clean_insurer.iloc[list(partial_match_insurer_indices)].copy()
-    not_found_insurer_only = clean_insurer.iloc[list(unmatched_insurer_indices)].copy()
+    # Create separate insurer sheets with bounds checking
+    try:
+        exact_match_insurer_only = clean_insurer.iloc[list(exact_match_insurer_indices)].copy()
+    except Exception as e:
+        logger.error(f"Error accessing exact match insurer indices: {str(e)}")
+        exact_match_insurer_only = pd.DataFrame()
+    
+    try:
+        partial_match_insurer_only = clean_insurer.iloc[list(partial_match_insurer_indices)].copy()
+    except Exception as e:
+        logger.error(f"Error accessing partial match insurer indices: {str(e)}")
+        partial_match_insurer_only = pd.DataFrame()
+    
+    try:
+        # Use the current unmatched indices instead of the original ones
+        if 'current_unmatched_indices' in locals() and current_unmatched_indices:
+            not_found_insurer_only = clean_insurer.loc[list(current_unmatched_indices)].copy()
+        else:
+            not_found_insurer_only = pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error accessing unmatched insurer indices: {str(e)}")
+        not_found_insurer_only = pd.DataFrame()
 
     # Write to Excel with 6 separate sheets
     try: 
@@ -316,10 +384,32 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
     cbl_partial_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Partial Match']['Amount'], errors='coerce').sum()
     cbl_no_match_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'No Match']['Amount'], errors='coerce').sum()
     
-    # Calculate insurer amounts (ensure numeric conversion)
-    exact_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(exact_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
-    partial_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(partial_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
-    unmatched_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(unmatched_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
+    # Calculate insurer amounts (ensure numeric conversion) with bounds checking
+    try:
+        exact_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(exact_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
+    except Exception as e:
+        logger.error(f"Error calculating exact match insurer amount: {str(e)}")
+        exact_match_insurer_amount = 0
+    
+    try:
+        partial_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(partial_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
+    except Exception as e:
+        logger.error(f"Error calculating partial match insurer amount: {str(e)}")
+        partial_match_insurer_amount = 0
+    
+    try:
+        # Use the current unmatched indices instead of the original ones
+        if 'current_unmatched_indices' in locals() and current_unmatched_indices:
+            unmatched_insurer_amount = pd.to_numeric(clean_insurer.loc[list(current_unmatched_indices)]['Amount_INSURER'], errors='coerce').sum()
+        else:
+            # Fallback to using the unmatched_insurer DataFrame if available
+            if 'unmatched_insurer' in locals() and not unmatched_insurer.empty and 'Amount_INSURER' in unmatched_insurer.columns:
+                unmatched_insurer_amount = pd.to_numeric(unmatched_insurer['Amount_INSURER'], errors='coerce').sum()
+            else:
+                unmatched_insurer_amount = 0
+    except Exception as e:
+        logger.error(f"Error calculating unmatched insurer amount: {str(e)}")
+        unmatched_insurer_amount = 0
     
     return {
         'exact_matches': exact_matches,

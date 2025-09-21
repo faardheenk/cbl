@@ -255,6 +255,10 @@ def matrix_pass(cbl_df, insurer_df, matrix_keys, global_tracker=None):
                     
                     # Register the match in global tracker
                     if global_tracker:
+                        # First mark as matrix used to prevent conflicts
+                        global_tracker.mark_matrix_used(all_insurer_indices)
+                        
+                        # Then register as exact match for CBL tracking
                         success, final_indices, match_conflicts, affected_cbl_rows = global_tracker.mark_exact_match(
                             cbl_row_index, all_insurer_indices, cbl_df
                         )
