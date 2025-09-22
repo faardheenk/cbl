@@ -420,74 +420,84 @@ def create_dynamic_column_mappings(cbl_columns, insurer_columns, custom_mappings
     """
     Create dynamic column mappings based on available columns.
     
+    Supports both simple key-value mappings and one-to-many mappings where a single key
+    can map to multiple columns (e.g., "Details": ["PlacingNo", "PolicyNo_1"]).
+    
     Args:
         cbl_columns: List of available CBL column names
         insurer_columns: List of available insurer column names
         custom_mappings: Optional custom mappings to override defaults
+                        Can contain lists for one-to-many mappings
         
     Returns:
         dict: Column mappings dictionary
     """
     # Default mappings - these are the standard expected column names
-    default_cbl_mappings = {
-        'PlacingNo': 'PlacingNo',
-        'PolicyNo': 'PolicyNo', 
-        'ClientName': 'ClientName',
-        'Amount': 'Amount'
+    default_mappings = {
+        'cbl_mappings': {
+            'PlacingNo': 'PlacingNo',
+            'PolicyNo': 'PolicyNo', 
+            'ClientName': 'ClientName',
+            'Amount': 'Amount'
+        },
+        'insurer_mappings': {
+            'PlacingNo': 'PlacingNo',
+            'PolicyNo_1': 'PolicyNo_1',
+            'PolicyNo_2': 'PolicyNo_2',
+            'ClientName': 'ClientName', 
+            'Amount': 'Amount'
+        }
     }
     
-    default_insurer_mappings = {
-        'PlacingNo': 'PlacingNo',
-        'PolicyNo_1': 'PolicyNo_1',
-        'PolicyNo_2': 'PolicyNo_2',
-        'ClientName': 'ClientName', 
-        'Amount': 'Amount'
-    }
-    
-    # Start with defaults
-    cbl_mappings = default_cbl_mappings.copy()
-    insurer_mappings = default_insurer_mappings.copy()
-    
-    # Apply custom mappings if provided
+    # Merge with custom mappings
+    mappings = default_mappings.copy()
     if custom_mappings:
-        if 'cbl_mappings' in custom_mappings:
-            cbl_mappings.update(custom_mappings['cbl_mappings'])
-        if 'insurer_mappings' in custom_mappings:
-            insurer_mappings.update(custom_mappings['insurer_mappings'])
+        for key in ['cbl_mappings', 'insurer_mappings']:
+            if key in custom_mappings:
+                mappings[key].update(custom_mappings[key])
     
-    # Helper function to find matching column with case-insensitive and whitespace-tolerant matching
     def find_matching_column(target_col, available_columns):
-        """Find a matching column in available_columns that matches target_col (case-insensitive, whitespace-tolerant)."""
+        """Find matching column with case-insensitive, whitespace-tolerant matching."""
         target_clean = str(target_col).strip().lower()
-        for col in available_columns:
-            if str(col).strip().lower() == target_clean:
-                return col
-        return None
+        return next((col for col in available_columns 
+                    if str(col).strip().lower() == target_clean), None)
     
-    # Filter to only include mappings where source columns exist (with smart matching)
-    filtered_cbl_mappings = {}
-    for k, v in cbl_mappings.items():
-        matching_col = find_matching_column(k, cbl_columns)
-        if matching_col:
-            filtered_cbl_mappings[matching_col] = v
-            if str(k) != str(matching_col):
-                logger.info(f"🔗 CBL mapping: '{k}' -> '{matching_col}' (matched with whitespace/case tolerance)")
+    def expand_mappings(mappings_dict, available_columns):
+        """Expand mappings, handling both simple and one-to-many mappings."""
+        expanded = {}
+        
+        for source_key, target_value in mappings_dict.items():
+            matching_col = find_matching_column(source_key, available_columns)
+            if not matching_col:
+                logger.warning(f"⚠️ No matching column found for '{source_key}' in available columns")
+                continue
+                
+            if isinstance(target_value, list):
+                # One-to-many mapping
+                for i, target_col in enumerate(target_value):
+                    if i == 0:
+                        expanded[matching_col] = target_col
+                    else:
+                        expanded[f"{matching_col}_{target_col}"] = target_col
+                logger.info(f"🔗 One-to-many mapping: '{source_key}' -> '{matching_col}' -> {target_value}")
+            else:
+                # Simple one-to-one mapping
+                expanded[matching_col] = target_value
+                if str(source_key) != str(matching_col):
+                    logger.info(f"🔗 Simple mapping: '{source_key}' -> '{matching_col}' (case/whitespace tolerance)")
+        
+        return expanded
     
-    filtered_insurer_mappings = {}
-    for k, v in insurer_mappings.items():
-        matching_col = find_matching_column(k, insurer_columns)
-        if matching_col:
-            filtered_insurer_mappings[matching_col] = v
-            if str(k) != str(matching_col):
-                logger.info(f"🔗 Insurer mapping: '{k}' -> '{matching_col}' (matched with whitespace/case tolerance)")
-    
-    logger.info(f"Dynamic CBL mappings: {filtered_cbl_mappings}")
-    logger.info(f"Dynamic insurer mappings: {filtered_insurer_mappings}")
-    
-    return {
-        'cbl_mappings': filtered_cbl_mappings,
-        'insurer_mappings': filtered_insurer_mappings
+    # Process both CBL and insurer mappings
+    result = {
+        'cbl_mappings': expand_mappings(mappings['cbl_mappings'], cbl_columns),
+        'insurer_mappings': expand_mappings(mappings['insurer_mappings'], insurer_columns)
     }
+    
+    logger.info(f"Dynamic CBL mappings: {result['cbl_mappings']}")
+    logger.info(f"Dynamic insurer mappings: {result['insurer_mappings']}")
+    
+    return result
 
 
 
@@ -523,6 +533,53 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
     # Get column mappings (already filtered by create_dynamic_column_mappings)
     cbl_column_map = column_mappings['cbl_mappings']
     insurer_column_map = column_mappings['insurer_mappings']
+
+    def handle_one_to_many_mappings(df, column_map):
+        """Handle one-to-many mappings by duplicating source columns efficiently."""
+        # Group mappings by original source column
+        source_groups = {}
+        for source_col, target_col in column_map.items():
+            # Find original source column (before _TargetCol suffix)
+            original_source = source_col
+            if '_' in source_col:
+                # Find the longest prefix that exists in the dataframe
+                parts = source_col.split('_')
+                for i in range(len(parts), 0, -1):
+                    potential_source = '_'.join(parts[:i])
+                    if potential_source in df.columns:
+                        original_source = potential_source
+                        break
+            
+            if original_source not in source_groups:
+                source_groups[original_source] = []
+            source_groups[original_source].append((source_col, target_col))
+        
+        # Create new column map with duplication
+        new_column_map = {}
+        for original_source, mappings in source_groups.items():
+            if len(mappings) > 1 and original_source in df.columns:
+                # One-to-many: duplicate the column
+                targets = [target for _, target in mappings]
+                logger.info(f"🔄 Duplicating '{original_source}' -> {targets}")
+                
+                for i, (_, target_col) in enumerate(mappings):
+                    if i == 0:
+                        new_column_map[original_source] = target_col
+                    else:
+                        temp_name = f"{original_source}_copy_{i}"
+                        df[temp_name] = df[original_source]
+                        new_column_map[temp_name] = target_col
+            else:
+                # Single mapping
+                for source_key, target_col in mappings:
+                    actual_source = source_key.rsplit('_', 1)[0] if '_' in source_key else source_key
+                    new_column_map[actual_source] = target_col
+        
+        return df, new_column_map
+
+    # Apply one-to-many handling
+    cbl_df, cbl_column_map = handle_one_to_many_mappings(cbl_df, cbl_column_map)
+    insurer_df, insurer_column_map = handle_one_to_many_mappings(insurer_df, insurer_column_map)
 
     # Rename columns directly (no need to filter again since mappings are pre-filtered)
     cbl_df = cbl_df.rename(columns=cbl_column_map)
