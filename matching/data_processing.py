@@ -438,14 +438,14 @@ def create_dynamic_column_mappings(cbl_columns, insurer_columns, custom_mappings
             'PlacingNo': 'PlacingNo',
             'PolicyNo': 'PolicyNo', 
             'ClientName': 'ClientName',
-            'Amount': 'Amount'
+            # 'Amount': 'ProcessedAmount'
         },
         'insurer_mappings': {
             'PlacingNo': 'PlacingNo',
             'PolicyNo_1': 'PolicyNo_1',
             'PolicyNo_2': 'PolicyNo_2',
             'ClientName': 'ClientName', 
-            'Amount': 'Amount'
+            # 'Amount': 'ProcessedAmount'
         }
     }
     
@@ -605,8 +605,8 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         cbl_df["PlacingNo_Clean"] = cbl_df["PlacingNo"].str.upper().str.strip()
         cbl_df["PlacingNo_Clean"] = cbl_df["PlacingNo_Clean"].str.replace(pattern, '', regex=True)
     
-    if "Amount" in cbl_df.columns:
-        cbl_df["Amount_Clean"] = pd.to_numeric(cbl_df["Amount"], errors="coerce")
+    if "ProcessedAmount" in cbl_df.columns:
+        cbl_df["ProcessedAmount_Clean"] = pd.to_numeric(cbl_df["ProcessedAmount"], errors="coerce")
         
     if "PolicyNo" in cbl_df.columns:
         # Enhanced policy number cleaning with duplicate handling
@@ -704,8 +704,8 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_Clean_INSURER"].str.replace(r'^\s*$', '', regex=True)
         insurer_df["PolicyNo_Clean_INSURER"] = insurer_df["PolicyNo_Clean_INSURER"].fillna("")
     
-    if "Amount_INSURER" in insurer_df.columns:
-        insurer_df["Amount_Clean_INSURER"] = pd.to_numeric(insurer_df["Amount_INSURER"], errors="coerce")
+    if "ProcessedAmount_INSURER" in insurer_df.columns:
+        insurer_df["ProcessedAmount_Clean_INSURER"] = pd.to_numeric(insurer_df["ProcessedAmount_INSURER"], errors="coerce")
     
     logger.info(f"DEBUG: After data cleaning - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
     
@@ -757,8 +757,8 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         logger.info("PolicyNo_2_INSURER column not found - creating empty column for compatibility")
 
     # Matrix Key - build dynamically based on available columns
-    default_cbl_cols = ['PlacingNo', 'PolicyNo', 'ClientName', 'Amount']
-    default_insurer_cols = ['PlacingNo_INSURER', 'PolicyNo_1_INSURER', 'ClientName_INSURER', 'Amount_INSURER']
+    default_cbl_cols = ['PlacingNo', 'PolicyNo', 'ClientName', 'ProcessedAmount']
+    default_insurer_cols = ['PlacingNo_INSURER', 'PolicyNo_1_INSURER', 'ClientName_INSURER', 'ProcessedAmount_INSURER']
 
     if matrix_key_columns:
         default_cbl_cols = matrix_key_columns.get('cbl_columns', default_cbl_cols)

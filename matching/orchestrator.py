@@ -89,20 +89,20 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                 
                 return cbl_has_keys and insurer_has_keys
             
-            # Pass 1: Requires PlacingNo and Amount
-            if has_required_keys(['PlacingNo', 'Amount'], ['PlacingNo', 'Amount']):
+            # Pass 1: Requires PlacingNo and ProcessedAmount
+            if has_required_keys(['PlacingNo', 'ProcessedAmount'], ['PlacingNo', 'ProcessedAmount']):
                 logger.info("✓ Pass 1: Required keys found in mappings - running Pass 1 with global tracking")
                 clean_cbl = pass1(clean_cbl, clean_insurer, tolerance, global_tracker)
             else:
-                logger.info("⚠ Pass 1: Required keys (PlacingNo, Amount) not found in mappings - skipping Pass 1")
+                logger.info("⚠ Pass 1: Required keys (PlacingNo, ProcessedAmount) not found in mappings - skipping Pass 1")
             
             # Log global tracker status after Pass 1
             if global_tracker:
                 logger.info(f"📊 After Pass 1: {global_tracker.get_usage_summary()}")
             
-            # Pass 2: Requires PolicyNo and Amount (CBL) + Amount and at least one PolicyNo (Insurer) - Name matching removed
-            cbl_has_pass2 = has_required_keys(['PolicyNo', 'Amount'], [])
-            insurer_has_pass2_base = has_required_keys([], ['Amount'])
+            # Pass 2: Requires PolicyNo and ProcessedAmount (CBL) + ProcessedAmount and at least one PolicyNo (Insurer) - Name matching removed
+            cbl_has_pass2 = has_required_keys(['PolicyNo', 'ProcessedAmount'], [])
+            insurer_has_pass2_base = has_required_keys([], ['ProcessedAmount'])
             
             # Check if insurer has at least one policy number column mapped
             insurer_mappings = column_mappings.get('insurer_mappings', {})
@@ -116,9 +116,9 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             else:
                 missing_keys = []
                 if not cbl_has_pass2:
-                    missing_keys.append("CBL: PolicyNo, Amount")
+                    missing_keys.append("CBL: PolicyNo, ProcessedAmount")
                 if not insurer_has_pass2_base:
-                    missing_keys.append("Insurer: Amount")
+                    missing_keys.append("Insurer: ProcessedAmount")
                 if not insurer_has_policy:
                     missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
                 logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
@@ -127,12 +127,12 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             if global_tracker:
                 logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
             
-            # Pass 3: Requires ClientName and Amount
-            if has_required_keys(['ClientName', 'Amount'], ['ClientName', 'Amount']):
+            # Pass 3: Requires ClientName and ProcessedAmount
+            if has_required_keys(['ClientName', 'ProcessedAmount'], ['ClientName', 'ProcessedAmount']):
                 logger.info("✓ Pass 3: Required keys found in mappings - running Pass 3 with global tracking")
                 clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
-                logger.info("⚠ Pass 3: Required keys (ClientName, Amount) not found in mappings - skipping Pass 3")
+                logger.info("⚠ Pass 3: Required keys (ClientName, ProcessedAmount) not found in mappings - skipping Pass 3")
             
             # Log final global tracker status
             if global_tracker:
@@ -380,19 +380,19 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
 
    
     # Calculate amounts for different match types (ensure numeric conversion)
-    cbl_exact_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Exact Match']['Amount'], errors='coerce').sum()
-    cbl_partial_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Partial Match']['Amount'], errors='coerce').sum()
-    cbl_no_match_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'No Match']['Amount'], errors='coerce').sum()
+    cbl_exact_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Exact Match']['ProcessedAmount'], errors='coerce').sum()
+    cbl_partial_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Partial Match']['ProcessedAmount'], errors='coerce').sum()
+    cbl_no_match_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'No Match']['ProcessedAmount'], errors='coerce').sum()
     
     # Calculate insurer amounts (ensure numeric conversion) with bounds checking
     try:
-        exact_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(exact_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
+        exact_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(exact_match_insurer_indices)]['ProcessedAmount_INSURER'], errors='coerce').sum()
     except Exception as e:
         logger.error(f"Error calculating exact match insurer amount: {str(e)}")
         exact_match_insurer_amount = 0
     
     try:
-        partial_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(partial_match_insurer_indices)]['Amount_INSURER'], errors='coerce').sum()
+        partial_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(partial_match_insurer_indices)]['ProcessedAmount_INSURER'], errors='coerce').sum()
     except Exception as e:
         logger.error(f"Error calculating partial match insurer amount: {str(e)}")
         partial_match_insurer_amount = 0
@@ -400,11 +400,11 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
     try:
         # Use the current unmatched indices instead of the original ones
         if 'current_unmatched_indices' in locals() and current_unmatched_indices:
-            unmatched_insurer_amount = pd.to_numeric(clean_insurer.loc[list(current_unmatched_indices)]['Amount_INSURER'], errors='coerce').sum()
+            unmatched_insurer_amount = pd.to_numeric(clean_insurer.loc[list(current_unmatched_indices)]['ProcessedAmount_INSURER'], errors='coerce').sum()
         else:
             # Fallback to using the unmatched_insurer DataFrame if available
-            if 'unmatched_insurer' in locals() and not unmatched_insurer.empty and 'Amount_INSURER' in unmatched_insurer.columns:
-                unmatched_insurer_amount = pd.to_numeric(unmatched_insurer['Amount_INSURER'], errors='coerce').sum()
+            if 'unmatched_insurer' in locals() and not unmatched_insurer.empty and 'ProcessedAmount_INSURER' in unmatched_insurer.columns:
+                unmatched_insurer_amount = pd.to_numeric(unmatched_insurer['ProcessedAmount_INSURER'], errors='coerce').sum()
             else:
                 unmatched_insurer_amount = 0
     except Exception as e:

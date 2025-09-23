@@ -162,9 +162,9 @@ def matrix_pass(cbl_df, insurer_df, matrix_keys, global_tracker=None):
 
             # Rebuild the matrix key using available columns
             # Use the actual column names from the DataFrames instead of hardcoded ones
-            available_cbl_cols = [col for col in ['PlacingNo_Clean', 'PolicyNo_Clean', 'ClientName', 'Amount_Clean'] 
+            available_cbl_cols = [col for col in ['PlacingNo_Clean', 'PolicyNo_Clean', 'ClientName', 'ProcessedAmount_Clean'] 
                                  if col in lhs_rows.columns]
-            available_insurer_cols = [col for col in ['PlacingNo_Clean_INSURER', 'PolicyNo_Clean_INSURER', 'ClientName_INSURER', 'Amount_Clean_INSURER'] 
+            available_insurer_cols = [col for col in ['PlacingNo_Clean_INSURER', 'PolicyNo_Clean_INSURER', 'ClientName_INSURER', 'ProcessedAmount_Clean_INSURER'] 
                                     if col in rhs_rows.columns]
             
             if not available_cbl_cols or not available_insurer_cols:
@@ -244,7 +244,7 @@ def matrix_pass(cbl_df, insurer_df, matrix_keys, global_tracker=None):
                     cbl_row_index = cbl_df[cbl_df['MatrixKey'] == lhs_key].index[0]
                     
                     # Calculate matched amount total
-                    matched_amount_total = sum(insurer_df.loc[all_insurer_indices, "Amount_Clean_INSURER"])
+                    matched_amount_total = sum(insurer_df.loc[all_insurer_indices, "ProcessedAmount_Clean_INSURER"])
                     
                     # Apply match to CBL DataFrame
                     cbl_df.at[cbl_row_index, "match_status"] = "Exact Match"

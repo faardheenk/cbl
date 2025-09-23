@@ -515,8 +515,8 @@ def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices,
     
     # Calculate amounts using the appropriate dataframe
     data_source = fallback_rows if fallback_rows is not None else insurer_df
-    cbl_amount = cbl_df.at[cbl_index, "Amount_Clean"]
-    available_amounts = data_source.loc[available_indices, "Amount_Clean_INSURER"]
+    cbl_amount = cbl_df.at[cbl_index, "ProcessedProcessedAmount_Clean"]
+    available_amounts = data_source.loc[available_indices, "ProcessedProcessedAmount_Clean_INSURER"]
     total_available_amount = available_amounts.sum()
     
     # Check if fallback indices create a perfect match
@@ -533,7 +533,7 @@ def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices,
 
 
 def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
-    """Pass 1: Matching by Placing Number and Amount."""
+    """Pass 1: Matching by Placing Number and ProcessedAmount."""
     logger.info("\n=== Pass 1: Matching by Placing Number and Amount ===")
     total_records = len(cbl_df)
     exact_matches = 0
@@ -557,7 +557,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
         add_pass(cbl_df, i, 1)
         
         placing = row["PlacingNo_Clean"]
-        amt1 = row["Amount_Clean"]
+        amt1 = row["ProcessedProcessedAmount_Clean"]
         
         # Validate input data
         if pd.isna(placing) or placing == "" or str(placing).strip() == "":
@@ -621,7 +621,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
             unique_amounts = []
             seen_indices = set()
             
-            for idx, amt in zip(insurer_matches.index.tolist(), insurer_matches["Amount_Clean_INSURER"].tolist()):
+            for idx, amt in zip(insurer_matches.index.tolist(), insurer_matches["ProcessedProcessedAmount_Clean_INSURER"].tolist()):
                 if idx not in seen_indices:
                     unique_indices.append(idx)
                     unique_amounts.append(amt)
@@ -874,7 +874,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
         else:
             # Apply the match using helper functions
             if match_type in ['exact', 'combination']:
-                total_amount = sum(insurer_df.loc[insurer_indices, "Amount_Clean_INSURER"])
+                total_amount = sum(insurer_df.loc[insurer_indices, "ProcessedProcessedAmount_Clean_INSURER"])
                 exact_matches += _apply_exact_match(
                     cbl_df, cbl_index, match['match_reason'], insurer_indices, 
                     total_amount, match.get('fallback_indices', []), 1, global_tracker,
@@ -882,7 +882,7 @@ def pass1(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                     amount_difference=match.get('amount_difference')
                 )
             else:  # partial
-                total_amount = insurer_df.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
+                total_amount = insurer_df.loc[insurer_indices, "ProcessedProcessedAmount_Clean_INSURER"].sum()
                 partial_matches += _apply_partial_match(
                     cbl_df, cbl_index, match['match_reason'], insurer_indices, total_amount, 1, global_tracker,
                     confidence_level=match.get('confidence_level'),
@@ -928,7 +928,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, global_tracker=None):
 
         add_pass(cbl_df, i, 2)
         tokens = extract_policy_tokens(row["PolicyNo_Clean"])
-        cbl_amt = row["Amount_Clean"]
+        cbl_amt = row["ProcessedAmount_Clean"]
 
         matched_indices = []
 
@@ -956,7 +956,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, global_tracker=None):
             if policy_match:
                 matched_indices.append(j)
 
-        total_amt = fallback_rows.loc[matched_indices, "Amount_Clean_INSURER"].sum()
+        total_amt = fallback_rows.loc[matched_indices, "ProcessedAmount_Clean_INSURER"].sum()
 
         if matched_indices:
             # Classify the amount match using graduated confidence levels
@@ -1047,7 +1047,7 @@ def pass2(cbl_df, insurer_df, tolerance=100, global_tracker=None):
                     amount_difference=match.get('amount_difference')
                 )
             else:  # partial
-                total_amount = fallback_rows.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
+                total_amount = fallback_rows.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
                 partial_matches += _apply_partial_match(
                     cbl_df, cbl_index, match['match_reason'], insurer_indices, total_amount, 2, global_tracker,
                     confidence_level=match.get('confidence_level'),
@@ -1080,7 +1080,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
     
     # Pre-calculate name scores for all insurer rows
     insurer_names = available_insurer["ClientName_INSURER"].fillna("").str.upper().str.strip()
-    insurer_amounts = available_insurer["Amount_Clean_INSURER"]
+    insurer_amounts = available_insurer["ProcessedAmount_Clean_INSURER"]
 
     # Phase 1: Collect all potential matches without applying them yet
     potential_matches = []
@@ -1116,8 +1116,8 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
             name_score = fuzz.partial_ratio(cbl_name, insurer_name)
             if name_score >= fuzzy_threshold:
                 # Calculate totals
-                cbl_total = cbl_df.loc[cbl_indices, 'Amount_Clean'].sum()
-                insurer_total = available_insurer.loc[insurer_indices, 'Amount_Clean_INSURER'].sum()
+                cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+                insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
                 difference = cbl_total + insurer_total
 
                 if -tolerance <= difference <= tolerance:
@@ -1178,7 +1178,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
         add_pass(cbl_df, i, 3)
 
         cbl_name = str(row["ClientName"]).upper().strip() if pd.notna(row["ClientName"]) else ""
-        cbl_amt = row["Amount_Clean"]   
+        cbl_amt = row["ProcessedAmount_Clean"]   
 
         # Skip if CBL name is empty
         if not cbl_name:
@@ -1261,7 +1261,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
             highest_name_score = name_scores[matched_indices].max()
             
             # Calculate total amount and determine confidence
-            total_amount = sum(insurer_df.loc[matched_indices, "Amount_Clean_INSURER"])
+            total_amount = sum(insurer_df.loc[matched_indices, "ProcessedAmount_Clean_INSURER"])
             final_match_type, final_difference, final_confidence = classify_amount_match(cbl_amt, total_amount, tolerance)
             
             # Determine match reason based on how the match was found
@@ -1458,7 +1458,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                                     logger.error(f"Pass 3 Group Match: CBL {cbl_idx} has no available insurer indices - skipping")
                                     continue
                         
-                        assigned_insurer_total = available_insurer.loc[assigned_insurer_indices, "Amount_Clean_INSURER"].sum()
+                        assigned_insurer_total = available_insurer.loc[assigned_insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
                         
                         cbl_df.at[cbl_idx, 'match_status'] = 'Exact Match'
                         cbl_df.at[cbl_idx, 'match_reason'] = match['match_reason']
@@ -1486,7 +1486,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                 )
                 
             else:  # partial
-                total_amount = available_insurer.loc[insurer_indices, "Amount_Clean_INSURER"].sum()
+                total_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
                 partial_matches += _apply_partial_match(
                     cbl_df, match['cbl_index'], match['match_reason'], insurer_indices, total_amount, 3, global_tracker,
                     confidence_level=match.get('confidence_level'),
