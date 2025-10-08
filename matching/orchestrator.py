@@ -6,7 +6,7 @@ import logging
 import os
 from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
-from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
+from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker, deduplicate_partial_matches
 from .output_handler import explode_and_merge
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,19 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                 
         else:
             print("All records matched via matrix keys - skipping additional passes")
+
+        # Deduplicate ALL matches - group rows sharing the same insurer indices
+        logger.info("🔄 Checking for duplicate insurer records across all match types...")
+        clean_cbl = deduplicate_partial_matches(clean_cbl)
+        
+        # Sort by group_id to keep grouped rows together in output
+        if 'group_id' in clean_cbl.columns:
+            logger.info("📋 Sorting data to group matched records together...")
+            clean_cbl['_group_sort_key'] = clean_cbl['group_id'].apply(
+                lambda x: (0, x) if pd.notna(x) and x is not None else (1, '')
+            )
+            clean_cbl = clean_cbl.sort_values('_group_sort_key').drop('_group_sort_key', axis=1)
+            clean_cbl = clean_cbl.reset_index(drop=True)
 
         # Generate output and statistics
         return _generate_output_and_statistics(clean_cbl, clean_insurer, output_path)

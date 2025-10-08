@@ -201,6 +201,10 @@ def _separate_group_and_individual_matches(cbl_subset):
     """
     Separate CBL rows into group matches and individual matches.
     
+    Groups are identified by:
+    1. Having a group_id column value (from deduplicate_partial_matches)
+    2. Having 'Name Group Match:' in match_reason (from Pass 3 group matching)
+    
     Args:
         cbl_subset: CBL dataframe subset
         
@@ -211,15 +215,24 @@ def _separate_group_and_individual_matches(cbl_subset):
     individual_matches = []
     
     for _, cbl_row in cbl_subset.iterrows():
-        match_reason = cbl_row.get('match_reason', '')
-        if 'Name Group Match:' in match_reason:
-            # Use match reason as group key
-            group_key = match_reason
-            if group_key not in group_matches:
-                group_matches[group_key] = []
-            group_matches[group_key].append(cbl_row)
+        # Check for group_id first (from partial match deduplication)
+        group_id = cbl_row.get('group_id', None)
+        if pd.notna(group_id) and group_id is not None:
+            # This row is part of a group detected by deduplication
+            if group_id not in group_matches:
+                group_matches[group_id] = []
+            group_matches[group_id].append(cbl_row)
         else:
-            individual_matches.append(cbl_row)
+            # Fall back to checking match_reason for Pass 3 name group matches
+            match_reason = cbl_row.get('match_reason', '')
+            if 'Name Group Match:' in match_reason:
+                # Use match reason as group key
+                group_key = match_reason
+                if group_key not in group_matches:
+                    group_matches[group_key] = []
+                group_matches[group_key].append(cbl_row)
+            else:
+                individual_matches.append(cbl_row)
     
     return group_matches, individual_matches
 

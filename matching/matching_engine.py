@@ -463,6 +463,157 @@ def _apply_no_match(cbl_df, cbl_index, match_reason):
     cbl_df.at[cbl_index, "partial_candidates_indices"] = []
 
 
+def deduplicate_partial_matches(cbl_df, overlap_threshold=0.8):
+    """
+    Detect and group ALL rows (Exact + Partial matches) that share identical OR overlapping insurer index sets.
+    
+    This prevents duplicate insurer data in Excel output by marking rows that
+    share the same insurers with a group_id. The output handler will then
+    "zip" them together (pair CBL rows with insurer rows side-by-side).
+    
+    IMPORTANT: Checks both Exact Match and Partial Match to catch all duplicates.
+    Groups rows with substantial overlap (>80% by default), not just identical sets.
+    
+    Example: If Row A has insurers [20,21,23,24] and Row E has insurers [20,21,23,25],
+    they share 75% overlap (3 out of 4) and will be grouped together.
+    
+    Args:
+        cbl_df: CBL dataframe with match results
+        overlap_threshold: Minimum overlap ratio to group rows (default 0.8 = 80%)
+        
+    Returns:
+        cbl_df: Updated dataframe with group_id column added
+    """
+    logger.info("\n=== Deduplicating Matches with Shared/Overlapping Insurers ===")
+    logger.info(f"Overlap threshold: {overlap_threshold*100}%")
+    
+    # Initialize group_id column if it doesn't exist
+    if 'group_id' not in cbl_df.columns:
+        cbl_df['group_id'] = None
+    
+    # Check ALL rows with matched insurers (both Exact and Partial matches)
+    # This catches duplicates regardless of match type
+    matched_rows = cbl_df[
+        (cbl_df['match_status'].isin(['Exact Match', 'Partial Match'])) &
+        (cbl_df['matched_insurer_indices'].notna())
+    ].copy()
+    
+    if matched_rows.empty:
+        logger.info("No matched rows to check for duplicates")
+        return cbl_df
+    
+    # Build a list of (cbl_index, insurer_set) pairs
+    cbl_insurer_pairs = []
+    
+    for idx, row in matched_rows.iterrows():
+        insurer_indices = row.get('matched_insurer_indices', [])
+        
+        # Skip if no insurer indices
+        if not insurer_indices or (isinstance(insurer_indices, list) and len(insurer_indices) == 0):
+            continue
+        
+        # Convert to set for overlap calculations
+        if isinstance(insurer_indices, list):
+            insurer_set = set(insurer_indices)
+        else:
+            insurer_set = {insurer_indices}
+        
+        cbl_insurer_pairs.append((idx, insurer_set))
+    
+    # Use Union-Find to group CBL rows with overlapping insurers
+    parent = {}  # Union-Find parent mapping
+    
+    def find(x):
+        """Find root parent with path compression."""
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+    
+    def union(x, y):
+        """Union two sets."""
+        root_x = find(x)
+        root_y = find(y)
+        if root_x != root_y:
+            parent[root_y] = root_x
+    
+    # Initialize each CBL as its own parent
+    for cbl_idx, _ in cbl_insurer_pairs:
+        parent[cbl_idx] = cbl_idx
+    
+    # Find overlapping pairs and union them
+    for i, (cbl_idx1, insurer_set1) in enumerate(cbl_insurer_pairs):
+        for j, (cbl_idx2, insurer_set2) in enumerate(cbl_insurer_pairs[i+1:], start=i+1):
+            # Calculate overlap
+            overlap = insurer_set1 & insurer_set2
+            if not overlap:
+                continue
+            
+            # Calculate overlap ratio (relative to the smaller set)
+            min_size = min(len(insurer_set1), len(insurer_set2))
+            overlap_ratio = len(overlap) / min_size if min_size > 0 else 0
+            
+            if overlap_ratio >= overlap_threshold:
+                logger.info(f"Found overlap: CBL {cbl_idx1} ({len(insurer_set1)} insurers) and CBL {cbl_idx2} ({len(insurer_set2)} insurers)")
+                logger.info(f"  Overlap: {len(overlap)} insurers ({overlap_ratio:.1%})")
+                union(cbl_idx1, cbl_idx2)
+    
+    # Group CBL rows by their root parent (connected components)
+    insurer_set_groups = {}
+    for cbl_idx, _ in cbl_insurer_pairs:
+        root = find(cbl_idx)
+        if root not in insurer_set_groups:
+            insurer_set_groups[root] = []
+        insurer_set_groups[root].append(cbl_idx)
+    
+    # Process groups with multiple CBL rows (duplicates/overlaps)
+    groups_found = 0
+    total_grouped_rows = 0
+    
+    for root_cbl, cbl_indices in insurer_set_groups.items():
+        if len(cbl_indices) <= 1:
+            continue  # Skip single-row groups (no duplicates)
+        
+        groups_found += 1
+        total_grouped_rows += len(cbl_indices)
+        
+        # Sort CBL indices to get consistent ordering
+        cbl_indices_sorted = sorted(cbl_indices)
+        primary_cbl = cbl_indices_sorted[0]
+        secondary_cbls = cbl_indices_sorted[1:]
+        
+        # Log the insurer sets for each CBL in the group (for debugging)
+        logger.info(f"Group {groups_found}: {len(cbl_indices)} CBL rows share/overlap insurers")
+        logger.info(f"  Primary CBL: {primary_cbl}")
+        logger.info(f"  Secondary CBLs: {secondary_cbls}")
+        
+        # Show insurer counts for transparency
+        for cbl_idx in cbl_indices_sorted:
+            cbl_insurers = cbl_df.at[cbl_idx, 'matched_insurer_indices']
+            insurer_count = len(cbl_insurers) if isinstance(cbl_insurers, list) else 1
+            logger.info(f"    CBL {cbl_idx}: {insurer_count} insurers")
+        
+        # Mark all rows in the group with the same group_id
+        group_id = f"GROUP_{groups_found}"
+        
+        for cbl_idx in cbl_indices_sorted:
+            cbl_df.at[cbl_idx, 'group_id'] = group_id
+            
+            # Update match reason to indicate grouping
+            original_reason = cbl_df.at[cbl_idx, 'match_reason']
+            cbl_df.at[cbl_idx, 'match_reason'] = f"{original_reason} [Grouped - {len(cbl_indices_sorted)} CBL records share insurers]"
+        
+        # Note: Insurer indices are kept on all rows - zipping happens in output stage
+    
+    if groups_found > 0:
+        logger.info(f"✓ Deduplication complete: Found {groups_found} groups with {total_grouped_rows} total CBL rows")
+        logger.info(f"  - Groups will be displayed in zipped format (CBL rows paired with insurer rows)")
+        logger.info(f"  - Overlapping insurers will be shown together to avoid duplication")
+    else:
+        logger.info("✓ No duplicate/overlapping insurer records found - all rows have unique insurer sets")
+    
+    return cbl_df
+
+
 def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices, tolerance, pass_number, global_tracker, fallback_rows=None):
     """
     Handle conflict resolution with fallback logic.

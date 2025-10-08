@@ -65,6 +65,11 @@ def _process_group_match(group_cbl_rows, insurer_rows, cbl_cols, insurer_cols):
     """
     Process a group match by zipping CBL and insurer rows together.
     
+    Shows insurer data only once by pairing CBL rows with insurer rows:
+    - Row 1: CBL_A + Insurer_D
+    - Row 2: CBL_E + Insurer_F
+    - Row 3: (empty CBL) + Insurer_G (if more insurers than CBL)
+    
     Args:
         group_cbl_rows: List of CBL rows in the group
         insurer_rows: List of insurer rows in the group
@@ -75,17 +80,18 @@ def _process_group_match(group_cbl_rows, insurer_rows, cbl_cols, insurer_cols):
         list: List of combined rows
     """
     combined_rows = []
+    max_rows = max(len(group_cbl_rows), len(insurer_rows))
     
-    # Only create rows for CBL rows that have corresponding insurer rows
-    # This prevents creating insurer-only rows that cause duplicates
-    for i, cbl_row in enumerate(group_cbl_rows):
-        if i < len(insurer_rows):
-            # Get corresponding insurer row
-            insurer_row = insurer_rows[i]
-            
-            # Create combined row
-            combined_row = _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols)
-            combined_rows.append(combined_row)
+    for i in range(max_rows):
+        # Get CBL row if available, otherwise None
+        cbl_row = group_cbl_rows[i] if i < len(group_cbl_rows) else None
+        
+        # Get insurer row if available, otherwise None
+        insurer_row = insurer_rows[i] if i < len(insurer_rows) else None
+        
+        # Create combined row (handles None for either CBL or insurer)
+        combined_row = _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols)
+        combined_rows.append(combined_row)
     
     return combined_rows
 
