@@ -118,9 +118,19 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
         combined_rows.append(combined_row)
         return combined_rows
     
-    for i, insurer_idx in enumerate(insurer_indices):
+    # DEDUPLICATION: Remove duplicates while preserving order
+    # Convert set to list to preserve order, then use dict.fromkeys() to remove duplicates
+    unique_indices = list(dict.fromkeys(list(insurer_indices)))
+    
+    # Log deduplication if it occurred
+    if len(unique_indices) < len(insurer_indices):
+        duplicates_removed = len(insurer_indices) - len(unique_indices)
+        logger.info(f"CBL {cbl_row.name}: Removed {duplicates_removed} duplicate insurer indices. "
+                   f"Original: {insurer_indices}, Deduplicated: {unique_indices}")
+    
+    for i, insurer_idx in enumerate(unique_indices):
         # Get insurer row using DataFrame index directly
-        insurer_row = insurer_df.iloc[insurer_idx]
+        insurer_row = insurer_df.loc[insurer_idx]
         
         # For multiple insurers, only show CBL data in first row
         if i > 0:

@@ -201,9 +201,11 @@ def _separate_group_and_individual_matches(cbl_subset):
     """
     Separate CBL rows into group matches and individual matches.
     
-    Groups are identified by:
-    1. Having a group_id column value (from deduplicate_partial_matches)
-    2. Having 'Name Group Match:' in match_reason (from Pass 3 group matching)
+    Groups are identified by having a group_id value from Pass 3 Phase 3 name grouping (NAME_GROUP_N).
+    
+    The output handler's only job is to:
+    - Check if row has group_id → group it (will be zipped in output)
+    - Otherwise → individual match (will be exploded in output)
     
     Args:
         cbl_subset: CBL dataframe subset
@@ -215,24 +217,17 @@ def _separate_group_and_individual_matches(cbl_subset):
     individual_matches = []
     
     for _, cbl_row in cbl_subset.iterrows():
-        # Check for group_id first (from partial match deduplication)
+        # Simple check: does this row have a group_id?
         group_id = cbl_row.get('group_id', None)
+        
         if pd.notna(group_id) and group_id is not None:
-            # This row is part of a group detected by deduplication
+            # This row is part of a group - add to group matches
             if group_id not in group_matches:
                 group_matches[group_id] = []
             group_matches[group_id].append(cbl_row)
         else:
-            # Fall back to checking match_reason for Pass 3 name group matches
-            match_reason = cbl_row.get('match_reason', '')
-            if 'Name Group Match:' in match_reason:
-                # Use match reason as group key
-                group_key = match_reason
-                if group_key not in group_matches:
-                    group_matches[group_key] = []
-                group_matches[group_key].append(cbl_row)
-            else:
-                individual_matches.append(cbl_row)
+            # No group_id - individual match
+            individual_matches.append(cbl_row)
     
     return group_matches, individual_matches
 

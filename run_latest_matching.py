@@ -35,23 +35,29 @@ def main():
     # File configuration with auto-detection
     file_options = [
         {
-            'cbl_file': "data/Demo_Input1.xlsx",
-            'insurer_file': "data/Demo_Input2.xlsx",
-            'output_file': "RESULT_DEMO_LATEST.xlsx",
-            'description': "Demo files (simplest test)"
+            'cbl_file': "data/SOA CBL.xlsx",
+            'insurer_file': "data/EI MERGE.xlsx",
+            'output_file': "RESULT_SOA_EI_LATEST.xlsx",
+            'description': "SOA CBL + EI MERGE"
         },
-        {
-            'cbl_file': "data/CBL RECON REVIEW.xlsx",
-            'insurer_file': "data/SWAN RECON REVIEW.xlsx", 
-            'output_file': "RESULT_RECON_REVIEW_LATEST.xlsx",
-            'description': "Recon review files"
-        },
-        {
-            'cbl_file': "data/CBL.xlsx",
-            'insurer_file': "data/SWAN.xlsx",
-            'output_file': "RESULT_LATEST.xlsx",
-            'description': "Main CBL/SWAN files"
-        }
+        # {
+        #     'cbl_file': "data/Demo_Input1.xlsx",
+        #     'insurer_file': "data/Demo_Input2.xlsx",
+        #     'output_file': "RESULT_DEMO_LATEST.xlsx",
+        #     'description': "Demo files (simplest test)"
+        # },
+        # {
+        #     'cbl_file': "data/CBL RECON REVIEW.xlsx",
+        #     'insurer_file': "data/SWAN RECON REVIEW.xlsx", 
+        #     'output_file': "RESULT_RECON_REVIEW_LATEST.xlsx",
+        #     'description': "Recon review files"
+        # },
+        # {
+        #     'cbl_file': "data/CBL.xlsx",
+        #     'insurer_file': "data/SWAN.xlsx",
+        #     'output_file': "RESULT_LATEST.xlsx",
+        #     'description': "Main CBL/SWAN files"
+        # }
     ]
     
     # Find the first available file set
@@ -82,35 +88,44 @@ def main():
     # Enhanced column mappings that work with the actual data structure
     column_mappings = {
         'cbl_mappings': {
-            # Demo file mappings
-            "REF": "PlacingNo",
-            "Name": "ClientName",
-            "POLNO": "PolicyNo",
-            "AMTDUE": "Amount",
-            
-            # Standard mappings for other files
+            # Princess Tuna CBL mappings
             "Placing/Endorsement No.": "PlacingNo",
             "Policy No.": "PolicyNo", 
             "Client Name": "ClientName", 
-            "Balance (MUR) (Net of Brokerage)": "Amount",
-            "Placing No.": "PlacingNo",
-            "Policy No": "PolicyNo",
-            "Net Amount": "Amount",
-            "Amount": "Amount"
+            "Balance Net of Brokerage": "ProcessedAmount",
+            
+            # # Demo file mappings
+            # "REF": "PlacingNo",
+            # "Name": "ClientName",
+            # "POLNO": "PolicyNo",
+            # "AMTDUE": "Amount",
+            
+            # # Standard mappings for other files
+            # "Balance (MUR) (Net of Brokerage)": "Amount",
+            # "Placing No.": "PlacingNo",
+            # "Policy No": "PolicyNo",
+            # "Net Amount": "Amount",
+            # "Amount": "Amount"
         },
         'insurer_mappings': {
-            # Demo file mappings
-            "REF": "PlacingNo",
-            "Name": "ClientName",
-            "POLNO": "PolicyNo_1",
-            "AMTDUE": "Amount",
+            # Princess Tuna Insurer mappings
+            "Policy Ref": "PlacingNo",
+            "Policy Number": "PolicyNo_1",
+            "Insured Name": "ClientName",
+            "Equivalent in MUR": "ProcessedAmount",
             
-            # SWAN file mappings
-            "BRKREF": "PlacingNo",
-            "NAME": "ClientName", 
-            "DOCSER": "PolicyNo_1",
-            "POLSER": "PolicyNo_2",
-            "AMTDUE": "Amount"
+            # # Demo file mappings
+            # "REF": "PlacingNo",
+            # "Name": "ClientName",
+            # "POLNO": "PolicyNo_1",
+            # "AMTDUE": "Amount",
+            
+            # # SWAN file mappings
+            # "BRKREF": "PlacingNo",
+            # "NAME": "ClientName", 
+            # "DOCSER": "PolicyNo_1",
+            # "POLSER": "PolicyNo_2",
+            # "AMTDUE": "Amount"
         }
     }
 
@@ -226,14 +241,17 @@ def run_with_custom_files(cbl_file, insurer_file, output_file=None):
     # Use flexible mappings that should work with most files
     column_mappings = {
         'cbl_mappings': {
+            # Princess Tuna CBL mappings
+            "Placing/Endorsement No.": "PlacingNo",
+            "Policy No.": "PolicyNo", 
+            "Client Name": "ClientName", 
+            "Balance Net of Brokerage": "ProcessedAmount",
+            
             # Try multiple possible column names
             "REF": "PlacingNo",
             "Name": "ClientName",
             "POLNO": "PolicyNo",
             "AMTDUE": "Amount",
-            "Placing/Endorsement No.": "PlacingNo",
-            "Policy No.": "PolicyNo", 
-            "Client Name": "ClientName", 
             "Balance (MUR) (Net of Brokerage)": "Amount",
             "Amount": "Amount",
             "PlacingNo": "PlacingNo",
@@ -241,6 +259,12 @@ def run_with_custom_files(cbl_file, insurer_file, output_file=None):
             "ClientName": "ClientName"
         },
         'insurer_mappings': {
+            # Princess Tuna Insurer mappings
+            "Policy Ref": "PlacingNo",
+            "Policy Number": "PolicyNo_1",
+            "Insured Name": "ClientName",
+            "Equivalent in MUR": "ProcessedAmount",
+            
             "REF": "PlacingNo",
             "Name": "ClientName",
             "POLNO": "PolicyNo_1",
