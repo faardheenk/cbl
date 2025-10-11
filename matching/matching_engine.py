@@ -1148,7 +1148,140 @@ def pass2(cbl_df, insurer_df, tolerance=100, global_tracker=None):
     return cbl_df
 
 
-def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=None):
+def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker):
+    """
+    Merge groups that have overlapping insurer indices into single larger groups.
+    
+    This function identifies groups with the same matched insurer indices and merges them
+    into a single group, ensuring all CBL records that share the same insurer records
+    are grouped together.
+    
+    Args:
+        cbl_df: CBL dataframe with group_id and matched_insurer_indices
+        available_insurer: Available insurer dataframe
+        global_tracker: GlobalMatchTracker instance
+        
+    Returns:
+        cbl_df: Updated CBL dataframe with merged groups
+    """
+    logger.info("\n=== Merging Groups with Overlapping Insurer Indices ===")
+    
+    # Get all records that have group_id and matched_insurer_indices
+    grouped_records = cbl_df[
+        (cbl_df['group_id'].notna()) & 
+        (cbl_df['matched_insurer_indices'].notna()) &
+        (cbl_df['matched_insurer_indices'].apply(lambda x: isinstance(x, list) and len(x) > 0))
+    ].copy()
+    
+    if grouped_records.empty:
+        logger.info("No grouped records found for merging")
+        return cbl_df
+    
+    logger.info(f"Found {len(grouped_records)} grouped records to analyze for merging")
+    
+    # Group records by their matched_insurer_indices
+    # Convert lists to tuples for hashing (lists can't be used as dict keys)
+    insurer_indices_to_groups = {}
+    
+    for idx, row in grouped_records.iterrows():
+        insurer_indices = row['matched_insurer_indices']
+        group_id = row['group_id']
+        
+        # Convert to sorted tuple for consistent grouping
+        indices_tuple = tuple(sorted(insurer_indices))
+        
+        if indices_tuple not in insurer_indices_to_groups:
+            insurer_indices_to_groups[indices_tuple] = []
+        insurer_indices_to_groups[indices_tuple].append((group_id, idx))
+    
+    # Find groups that share the same insurer indices
+    groups_to_merge = []
+    for indices_tuple, group_records in insurer_indices_to_groups.items():
+        if len(group_records) > 1:
+            # Multiple groups share the same insurer indices - they should be merged
+            group_ids = list(set([grp[0] for grp in group_records]))
+            cbl_indices = [grp[1] for grp in group_records]
+            groups_to_merge.append({
+                'insurer_indices': list(indices_tuple),
+                'original_group_ids': group_ids,
+                'cbl_indices': cbl_indices
+            })
+    
+    if not groups_to_merge:
+        logger.info("No groups found with overlapping insurer indices - no merging needed")
+        return cbl_df
+    
+    logger.info(f"Found {len(groups_to_merge)} sets of groups to merge")
+    
+    # Create new merged groups
+    merged_group_counter = 0
+    for merge_info in groups_to_merge:
+        merged_group_counter += 1
+        new_group_id = f"MERGED_GROUP_{merged_group_counter}"
+        
+        insurer_indices = merge_info['insurer_indices']
+        original_group_ids = merge_info['original_group_ids']
+        cbl_indices = merge_info['cbl_indices']
+        
+        logger.info(f"\n🔄 Merging Groups:")
+        logger.info(f"  New Group ID: {new_group_id}")
+        logger.info(f"  Original Groups: {original_group_ids}")
+        logger.info(f"  Shared Insurer Indices: {insurer_indices}")
+        logger.info(f"  CBL Records to Merge: {len(cbl_indices)}")
+        
+        # Calculate combined totals for the merged group
+        cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+        insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+        difference = abs(cbl_total + insurer_total)
+        
+        # Determine the match type for the merged group
+        # If any original group was exact match, the merged group should be exact match
+        has_exact_match = any(
+            cbl_df.at[idx, 'match_status'] == 'Exact Match' 
+            for idx in cbl_indices
+        )
+        
+        if has_exact_match:
+            match_type = "EXACT"
+            confidence = "High"
+        else:
+            match_type = "PARTIAL"
+            confidence = "Medium"
+        
+        logger.info(f"  Merged Group Totals:")
+        logger.info(f"    CBL Total: Rs{cbl_total:.2f}")
+        logger.info(f"    Insurer Total: Rs{insurer_total:.2f}")
+        logger.info(f"    Difference: Rs{difference:.2f}")
+        logger.info(f"    Match Type: {match_type} ({confidence} Confidence)")
+        
+        # Update all CBL records in the merged group
+        for cbl_idx in cbl_indices:
+            # Update group_id
+            cbl_df.at[cbl_idx, 'group_id'] = new_group_id
+            
+            # Update match reason to reflect merging
+            original_reason = cbl_df.at[cbl_idx, 'match_reason']
+            new_reason = f"{original_reason} (Merged from groups: {', '.join(original_group_ids)})"
+            cbl_df.at[cbl_idx, 'match_reason'] = new_reason
+            
+            # Update matched_insurer_indices to include all shared indices
+            cbl_df.at[cbl_idx, 'matched_insurer_indices'] = insurer_indices
+            
+            # Update matched_amtdue_total to reflect the full insurer total
+            cbl_df.at[cbl_idx, 'matched_amtdue_total'] = insurer_total
+            
+            # Update amount_difference
+            cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
+            amount_diff = abs(cbl_amount + insurer_total)
+            cbl_df.at[cbl_idx, 'amount_difference'] = amount_diff
+            
+            logger.info(f"  ✓ Updated CBL {cbl_idx}: {match_type} match with {len(insurer_indices)} insurer records")
+    
+    logger.info(f"\n✓ Group merging complete: {len(groups_to_merge)} groups merged into {merged_group_counter} merged groups")
+    return cbl_df
+
+
+def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=None):
     """Pass 3: Name-based Clustering and Grouping Strategy."""
     logger.info("\n=== Pass 3: Name-based Clustering and Grouping ===")
     logger.info("Strategy: Group CBL rows with similar insurer names, compare amounts to determine exact vs partial matches")
@@ -1279,6 +1412,9 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=95, global_tracker=
                     
                     # Assign group_id for output organization
                     cbl_df.at[cbl_idx, 'group_id'] = group_id
+    
+    # NEW: Merge groups with overlapping insurer indices
+    cbl_df = _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker)
                         
     logger.info(f"\n✓ Pass 3 complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} name groups")
     return cbl_df

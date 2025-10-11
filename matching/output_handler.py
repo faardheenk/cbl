@@ -112,6 +112,14 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
     combined_rows = []
     insurer_indices = _extract_insurer_indices(cbl_row)
     
+    # DEBUG: Log CBL row information
+    cbl_client_name = cbl_row.get('ClientName', 'N/A')
+    cbl_matrix_key = cbl_row.get('MatrixKey', 'N/A')
+    logger.debug(f"Processing individual match for CBL {cbl_row.name}: ClientName='{cbl_client_name}', MatrixKey='{cbl_matrix_key}'")
+    logger.debug(f"  matched_insurer_indices from CBL row: {insurer_indices}")
+    logger.debug(f"  insurer_df index range: {insurer_df.index.min()} to {insurer_df.index.max()}")
+    logger.debug(f"  insurer_df shape: {insurer_df.shape}")
+    
     # If no insurer indices, create a row with only CBL data
     if not insurer_indices:
         combined_row = _create_zipped_row(cbl_row, None, cbl_cols, insurer_cols)
@@ -128,9 +136,22 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
         logger.info(f"CBL {cbl_row.name}: Removed {duplicates_removed} duplicate insurer indices. "
                    f"Original: {insurer_indices}, Deduplicated: {unique_indices}")
     
+    logger.debug(f"  Processing {len(unique_indices)} unique insurer indices: {unique_indices}")
+    
     for i, insurer_idx in enumerate(unique_indices):
+        # Validate index exists in insurer_df
+        if insurer_idx not in insurer_df.index:
+            logger.error(f"CBL {cbl_row.name}: Insurer index {insurer_idx} NOT FOUND in insurer_df!")
+            logger.error(f"  Available insurer indices: {list(insurer_df.index[:10])}... (showing first 10)")
+            continue
+        
         # Get insurer row using DataFrame index directly
         insurer_row = insurer_df.loc[insurer_idx]
+        
+        # DEBUG: Log insurer information
+        insurer_client_name = insurer_row.get('ClientName_INSURER', 'N/A')
+        insurer_matrix_key = insurer_row.get('MatrixKey_INSURER', 'N/A')
+        logger.debug(f"  [{i}] Fetched insurer {insurer_idx}: ClientName='{insurer_client_name}', MatrixKey='{insurer_matrix_key}'")
         
         # For multiple insurers, only show CBL data in first row
         if i > 0:
@@ -143,6 +164,7 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
         combined_row = _create_zipped_row(cbl_row_copy, insurer_row, cbl_cols, insurer_cols)
         combined_rows.append(combined_row)
     
+    logger.debug(f"  Created {len(combined_rows)} combined rows for CBL {cbl_row.name}")
     return combined_rows
 
 
@@ -163,6 +185,22 @@ def explode_and_merge(cbl_subset, insurer_df):
     Returns:
         pd.DataFrame: Combined dataframe with CBL and insurer data
     """
+    logger.info(f"\n=== explode_and_merge called ===")
+    logger.info(f"CBL subset: {len(cbl_subset)} rows")
+    logger.info(f"Insurer DF: {len(insurer_df)} rows, index range: {insurer_df.index.min()} to {insurer_df.index.max()}")
+    
+    # DEBUG: Check group_id values BEFORE any processing
+    if 'group_id' in cbl_subset.columns:
+        unique_groups = cbl_subset['group_id'].unique()
+        nan_count = cbl_subset['group_id'].isna().sum()
+        logger.info(f"DEBUG: group_id analysis BEFORE copy:")
+        logger.info(f"  - Total unique group_ids: {len(unique_groups)}")
+        logger.info(f"  - NaN group_ids: {nan_count}")
+        logger.info(f"  - Sample group_ids (first 10): {list(unique_groups[:10])}")
+        # Check for string 'nan'
+        string_nan_count = (cbl_subset['group_id'] == 'nan').sum()
+        logger.info(f"  - String 'nan' group_ids: {string_nan_count}")
+    
     cbl_copy = cbl_subset.copy()
     cbl_cols = list(cbl_copy.columns)
     insurer_cols = list(insurer_df.columns)
@@ -170,21 +208,25 @@ def explode_and_merge(cbl_subset, insurer_df):
     # Separate group matches from individual matches
     group_matches, individual_matches = _separate_group_and_individual_matches(cbl_copy)
     
+    logger.info(f"Separated into {len(group_matches)} groups and {len(individual_matches)} individual matches")
+    
     exploded_rows = []
     
     # Process individual matches
+    logger.info(f"\n--- Processing {len(individual_matches)} individual matches ---")
     for cbl_row in individual_matches:
         individual_combined_rows = _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols)
         exploded_rows.extend(individual_combined_rows)
         
 
     # Process group matches
+    logger.info(f"\n--- Processing {len(group_matches)} group matches ---")
     for group_key, group_cbl_rows in group_matches.items():
-        logger.info(f"Processing group match: {len(group_cbl_rows)} CBL rows")
+        logger.info(f"Processing group {group_key}: {len(group_cbl_rows)} CBL rows")
         
         # Get all insurer rows for this group
         insurer_rows = _get_insurer_rows_for_group(group_cbl_rows, insurer_df)
-        logger.info(f"Found {len(insurer_rows)} insurer rows for group")
+        logger.info(f"Found {len(insurer_rows)} insurer rows for group {group_key}")
         
         # Create zipped rows for group match
         group_combined_rows = _process_group_match(group_cbl_rows, insurer_rows, cbl_cols, insurer_cols)
@@ -195,5 +237,5 @@ def explode_and_merge(cbl_subset, insurer_df):
     result_df = result_df[[col for col in cbl_cols if col in result_df.columns] + 
                          [col for col in insurer_cols if col in result_df.columns]]
     
-    logger.info(f"Created {len(result_df)} combined rows from {len(cbl_copy)} CBL rows")
+    logger.info(f"✓ Created {len(result_df)} combined rows from {len(cbl_copy)} CBL rows")
     return result_df

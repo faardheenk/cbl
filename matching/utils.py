@@ -189,11 +189,19 @@ def _get_insurer_rows_for_group(group_cbl_rows, insurer_df):
     for cbl_row in group_cbl_rows:
         all_insurer_indices.update(_extract_insurer_indices(cbl_row))
     
+    logger.debug(f"_get_insurer_rows_for_group: Collected {len(all_insurer_indices)} unique insurer indices: {all_insurer_indices}")
+    
     insurer_rows = []
     for insurer_idx in all_insurer_indices:
-        insurer_row = insurer_df.iloc[insurer_idx]
+        # FIX: Use .loc (label-based) instead of .iloc (position-based)
+        # The matched_insurer_indices stores DataFrame index labels, not positions
+        if insurer_idx not in insurer_df.index:
+            logger.error(f"Insurer index {insurer_idx} not found in insurer_df! Available: {list(insurer_df.index[:10])}")
+            continue
+        insurer_row = insurer_df.loc[insurer_idx]
         insurer_rows.append(insurer_row)
     
+    logger.debug(f"_get_insurer_rows_for_group: Returning {len(insurer_rows)} insurer rows")
     return insurer_rows
 
 
@@ -220,14 +228,17 @@ def _separate_group_and_individual_matches(cbl_subset):
         # Simple check: does this row have a group_id?
         group_id = cbl_row.get('group_id', None)
         
-        if pd.notna(group_id) and group_id is not None:
+        # CRITICAL: Check for NaN/None/empty/string 'nan' BEFORE using as dict key
+        # Python quirk: NaN as dict key causes all NaN values to be grouped together
+        # Also check for string 'nan' which can come from data processing
+        if pd.isna(group_id) or group_id is None or group_id == '' or str(group_id).lower() == 'nan':
+            # No valid group_id - individual match
+            individual_matches.append(cbl_row)
+        else:
             # This row is part of a group - add to group matches
             if group_id not in group_matches:
                 group_matches[group_id] = []
             group_matches[group_id].append(cbl_row)
-        else:
-            # No group_id - individual match
-            individual_matches.append(cbl_row)
     
     return group_matches, individual_matches
 

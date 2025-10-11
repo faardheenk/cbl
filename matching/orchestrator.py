@@ -201,94 +201,43 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
     logger.info(f"  - Unmatched insurer indices: {unmatched_insurer_count}")
     logger.info(f"  - Sum of all categories: {exact_match_insurer_count + partial_match_insurer_count + unmatched_insurer_count}")
 
-    # Split clean_cbls - RESPECTING GROUP_ID
-    # If records have the same group_id, keep them together in the same sheet
-    # Groups only contain Partial Match + No Match records (Exact Match not grouped)
+    # Split clean_cbls by individual match_status
+    # group_id is preserved for tracking but doesn't affect sheet assignment
+    # Each record goes to the sheet matching its individual match_status
     
-    logger.info("\n=== Splitting CBL records by match status (respecting Partial+NoMatch groups) ===")
+    logger.info("\n=== Splitting CBL records by individual match status (preserving group_id for reference) ===")
     
-    # Check if group_id column exists
-    has_groups = 'group_id' in clean_cbl.columns and clean_cbl['group_id'].notna().any()
+    # Simple approach: Split by match_status regardless of grouping
+    # The group_id column will be preserved in the output for reference
+    exact_matches = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy()
+    partial_matches = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
+    no_matches = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
     
-    # Initialize these variables outside the if block for later use
-    exact_match_indices = set()
-    partial_match_indices = set()
-    no_match_indices = set()
+    logger.info(f"✓ Split complete by individual match_status:")
+    logger.info(f"  - Exact matches: {len(exact_matches)}")
+    logger.info(f"  - Partial matches: {len(partial_matches)}")
+    logger.info(f"  - No matches: {len(no_matches)}")
     
-    if has_groups:
-        logger.info("Found grouped records - keeping Partial+NoMatch groups together")
+    # Log grouping statistics if groups exist
+    if 'group_id' in clean_cbl.columns and clean_cbl['group_id'].notna().any():
+        grouped_records = clean_cbl[clean_cbl['group_id'].notna()]
+        num_groups = grouped_records['group_id'].nunique()
+        logger.info(f"  - Records with group_id: {len(grouped_records)} across {num_groups} groups")
+        logger.info(f"    (group_id preserved in output for reference)")
         
-        # Track processed groups
-        processed_groups = set()
-        
-        # First pass: Process grouped records (Partial + No Match ONLY)
-        grouped_records = clean_cbl[clean_cbl['group_id'].notna()].copy()
-        
+        # Log mixed groups (groups with multiple match statuses)
         for group_id in grouped_records['group_id'].unique():
-            if pd.isna(group_id) or group_id in processed_groups:
+            if pd.isna(group_id):
                 continue
-            
-            processed_groups.add(group_id)
-            group_indices = grouped_records[grouped_records['group_id'] == group_id].index.tolist()
-            group_statuses = clean_cbl.loc[group_indices, 'match_status'].values
-            
-            # Groups can now contain Exact Match, Partial Match, or No Match records
-            # Determine the destination sheet based on the statuses in the group
-            
-            # Convert to list for proper 'in' check (numpy array 'in' doesn't work as expected)
-            statuses_list = list(group_statuses)
-            has_exact = any(status == 'Exact Match' for status in statuses_list)
-            has_partial = any(status == 'Partial Match' for status in statuses_list)
-            has_no_match = any(status == 'No Match' for status in statuses_list)
-            
-            if has_exact:
-                # If group has ANY Exact Match records, all go to Exact Match sheet
-                exact_match_indices.update(group_indices)
-                logger.info(f"  Group {group_id}: {len(group_indices)} records → Exact Match sheet")
-                logger.info(f"    Statuses in group: {statuses_list}")
-            elif has_partial:
-                # If group has Partial Match records (but no Exact Match), all go to Partial Match sheet
-                partial_match_indices.update(group_indices)
-                logger.info(f"  Group {group_id}: {len(group_indices)} records → Partial Match sheet")
-                logger.info(f"    Statuses in group: {statuses_list}")
-            else:
-                # All No Match
-                no_match_indices.update(group_indices)
-                logger.info(f"  Group {group_id}: {len(group_indices)} records → No Match sheet")
-                logger.info(f"    Statuses in group: {statuses_list}")
-        
-        # Second pass: Process ungrouped records (including ALL Exact Match)
-        ungrouped_records = clean_cbl[clean_cbl['group_id'].isna()]
-        
-        for idx, row in ungrouped_records.iterrows():
-            status = row['match_status']
-            if status == 'Exact Match':
-                exact_match_indices.add(idx)
-            elif status == 'Partial Match':
-                partial_match_indices.add(idx)
-            else:
-                no_match_indices.add(idx)
-        
-        # Create dataframes from collected indices
-        exact_matches = clean_cbl.loc[list(exact_match_indices)].copy() if exact_match_indices else pd.DataFrame()
-        partial_matches = clean_cbl.loc[list(partial_match_indices)].copy() if partial_match_indices else pd.DataFrame()
-        no_matches = clean_cbl.loc[list(no_match_indices)].copy() if no_match_indices else pd.DataFrame()
-        
-        logger.info(f"✓ Grouped splitting complete:")
-        logger.info(f"  - Exact matches: {len(exact_matches)} (ungrouped only)")
-        logger.info(f"  - Partial matches: {len(partial_matches)} (including grouped records)")
-        logger.info(f"  - No matches: {len(no_matches)} (including grouped records)")
-    else:
-        logger.info("No grouped records found - using simple status filtering")
-        
-        # Original logic when no groups exist
-        exact_matches = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy() 
-        partial_matches = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
-        no_matches = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
-        
-        logger.info(f"  - Exact matches: {len(exact_matches)}")
-        logger.info(f"  - Partial matches: {len(partial_matches)}")
-        logger.info(f"  - No matches: {len(no_matches)}")
+            group_indices = grouped_records[grouped_records['group_id'] == group_id].index
+            group_statuses = clean_cbl.loc[group_indices, 'match_status'].unique()
+            if len(group_statuses) > 1:
+                logger.info(f"    Mixed status group {group_id}: {list(group_statuses)}")
+    
+    # Store indices for later use in creating CBL-only sheets
+    exact_match_indices = set(exact_matches.index) if not exact_matches.empty else set()
+    partial_match_indices = set(partial_matches.index) if not partial_matches.empty else set()
+    no_match_indices = set(no_matches.index) if not no_matches.empty else set()
 
     # Explode matched_insurer_indices and merge with insurer
     exact_matches = explode_and_merge(exact_matches, clean_insurer)
@@ -403,17 +352,11 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
             clean_cbl.at[idx, "match_status"] = "No Match"
     
     # Create separate CBL sheets (without insurer data merged)
-    # IMPORTANT: Use the same indices from group-aware splitting to respect groups
-    if has_groups and 'exact_match_indices' in locals() and 'partial_match_indices' in locals() and 'no_match_indices' in locals():
-        logger.info("Creating CBL-only sheets using group-aware indices")
-        exact_matches_cbl_only = clean_cbl.loc[list(exact_match_indices)].copy() if exact_match_indices else pd.DataFrame()
-        partial_matches_cbl_only = clean_cbl.loc[list(partial_match_indices)].copy() if partial_match_indices else pd.DataFrame()
-        no_matches_cbl_only = clean_cbl.loc[list(no_match_indices)].copy() if no_match_indices else pd.DataFrame()
-    else:
-        logger.info("Creating CBL-only sheets using simple status filtering")
-        exact_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy()
-        partial_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
-        no_matches_cbl_only = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
+    # Use the indices from the match_status splitting
+    logger.info("Creating CBL-only sheets by match_status")
+    exact_matches_cbl_only = clean_cbl.loc[list(exact_match_indices)].copy() if exact_match_indices else pd.DataFrame()
+    partial_matches_cbl_only = clean_cbl.loc[list(partial_match_indices)].copy() if partial_match_indices else pd.DataFrame()
+    no_matches_cbl_only = clean_cbl.loc[list(no_match_indices)].copy() if no_match_indices else pd.DataFrame()
 
     # Create separate insurer sheets with bounds checking
     try:
