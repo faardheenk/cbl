@@ -10,6 +10,7 @@ import pandas as pd
 from matching.orchestrator import run_matching_process
 from matching.data_processing import create_dynamic_column_mappings, read_excel_with_smart_headers
 import datetime
+from sharepoint_audit_logger import SharePointAuditLogger, create_audit_statistics
 
 # Configure logging
 logging.basicConfig(
@@ -18,11 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# log_file = "E:\\FRCI\\AuditLog.txt"
-# message = f"Script ran at: {datetime.datetime.now()}\n"
- 
-# with open(log_file, "a") as f:
-#     f.write(message)
 
 def sanitize_json_string(s):
     # Remove trailing commas before closing } or ]
@@ -59,6 +55,9 @@ class SharePointService:
         }
         self.ctx = None
         
+        # Initialize audit logger
+        self.audit_logger = SharePointAuditLogger(self, audit_list_name="Audit Log")
+        
         # # Validate required environment variables
         # if not all([self.site_url, self.client_username, self.client_password]):
         #     raise ValueError("Missing required SharePoint configuration in .env file")
@@ -77,6 +76,28 @@ class SharePointService:
         except Exception as ex:
             logger.error(f"Failed to get SharePoint client context: {str(ex)}")
             raise
+
+    def ensure_audit_log_list_exists(self):
+        """
+        Ensure the Audit Log list exists in SharePoint, create it if it doesn't.
+        Also ensures all required columns exist.
+        
+        Returns:
+            bool: True if list exists or was created successfully
+        """
+        try:
+            ctx = self.get_client_context()
+            
+            audit_list = ctx.web.lists.get_by_title("Audit Log")
+            ctx.load(audit_list)
+            ctx.execute_query()
+            logger.info("✅ Audit Log list already exists")
+            
+            return True
+        except Exception as ex:
+            logger.error(f"❌ Failed to ensure Audit Log list exists: {str(ex)}")
+            return False
+
 
     def get_column_mappings(self, insurer_name=None):
         """Get column mappings from SharePoint."""
@@ -111,13 +132,13 @@ class SharePointService:
             logger.error(f"Failed to get column mappings: {str(ex)}")
             raise
 
-    def create_hybrid_column_mappings(self, cbl_file_path, insurer_file_path, insurer_name):
+    def create_hybrid_column_mappings_from_content(self, cbl_file_content, insurer_file_content, insurer_name):
         """
-        Create column mappings using both SharePoint config and dynamic detection.
+        Create column mappings using both SharePoint config and dynamic detection from file content.
         
         Args:
-            cbl_file_path: Path to CBL Excel file
-            insurer_file_path: Path to insurer Excel file  
+            cbl_file_content: CBL Excel file content as bytes
+            insurer_file_content: Insurer Excel file content as bytes
             insurer_name: Name of insurer for SharePoint lookup
             
         Returns:
@@ -138,8 +159,9 @@ class SharePointService:
             
             # Step 2: Read files to analyze column structure with smart header detection
             logger.info(f"📊 Analyzing file structure with smart header detection...")
-            cbl_df = read_excel_with_smart_headers(cbl_file_path)
-            insurer_df = read_excel_with_smart_headers(insurer_file_path)
+            from matching.data_processing import read_excel_with_smart_headers
+            cbl_df = read_excel_with_smart_headers(cbl_file_content)
+            insurer_df = read_excel_with_smart_headers(insurer_file_content)
             
             cbl_columns = list(cbl_df.columns)
             insurer_columns = list(insurer_df.columns)
@@ -149,6 +171,7 @@ class SharePointService:
             
             # Step 3: Create dynamic mappings with SharePoint overrides
             logger.info(f"🎯 Creating hybrid column mappings...")
+            from matching.data_processing import create_dynamic_column_mappings
             dynamic_mappings = create_dynamic_column_mappings(
                 cbl_columns=cbl_columns,
                 insurer_columns=insurer_columns,
@@ -173,8 +196,9 @@ class SharePointService:
             # Fallback to pure dynamic detection if everything fails
             try:
                 logger.info("🔄 Falling back to pure dynamic detection with smart headers...")
-                cbl_df = read_excel_with_smart_headers(cbl_file_path)
-                insurer_df = read_excel_with_smart_headers(insurer_file_path)
+                from matching.data_processing import read_excel_with_smart_headers, create_dynamic_column_mappings
+                cbl_df = read_excel_with_smart_headers(cbl_file_content)
+                insurer_df = read_excel_with_smart_headers(insurer_file_content)
                 
                 fallback_mappings = create_dynamic_column_mappings(
                     cbl_columns=list(cbl_df.columns),
@@ -187,6 +211,7 @@ class SharePointService:
             except Exception as fallback_error:
                 logger.error(f"❌ Even fallback failed: {str(fallback_error)}")
                 raise
+
 
     def get_matrix(self, insurer_name=None):
         try:
@@ -377,6 +402,114 @@ class SharePointService:
             logger.error(f"Error getting Excel files from folder {folder_url}: {str(ex)}")
             return []
         
+    def update_folder_status(self, folder_url, status):
+        """
+        Update the status of a SharePoint folder.
+        
+        Args:
+            folder_url (str): Server relative URL of the folder
+            status (str): New status value (e.g., 'Pending', 'In Progress', 'Manual Review', 'Failed')
+        """
+        try:
+            ctx = self.get_client_context()
+            folder_obj = ctx.web.get_folder_by_server_relative_url(folder_url)
+            folder_list_item = folder_obj.list_item_all_fields
+            ctx.load(folder_list_item)
+            ctx.execute_query()
+            folder_list_item.set_property('Status', status)
+            folder_list_item.update()
+            ctx.execute_query()
+            logger.info(f"✅ Updated folder status to '{status}': {folder_url}")
+        except Exception as e:
+            logger.error(f"Error updating folder status to '{status}': {str(e)}")
+            raise
+
+    def update_file_status(self, file_url, status):
+        """
+        Update the status of a SharePoint file.
+        
+        Args:
+            file_url (str): Server relative URL of the file
+            status (str): New status value (e.g., 'Pending', 'In Progress', 'Manual Review', 'Failed')
+        """
+        try:
+            ctx = self.get_client_context()
+            file_obj = ctx.web.get_file_by_server_relative_url(file_url)
+            file_list_item = file_obj.listItemAllFields
+            ctx.load(file_list_item)
+            ctx.execute_query()
+            file_list_item.set_property('Status', status)
+            file_list_item.update()
+            ctx.execute_query()
+            logger.info(f"✅ Updated file status to '{status}': {file_url}")
+        except Exception as e:
+            logger.error(f"Error updating file status to '{status}': {str(e)}")
+            raise
+
+    def upload_content_to_sharepoint(self, file_content, filename, library_name, folder_path):
+        """
+        Upload file content directly to SharePoint without saving locally.
+        
+        Args:
+            file_content (bytes): File content as bytes
+            filename (str): Name of the file to upload
+            library_name (str): Name of the SharePoint library
+            folder_path (str): Path to the folder in SharePoint
+            
+        Returns:
+            str: Server relative URL of the uploaded file
+        """
+        try:
+            ctx = self.get_client_context()
+            library = ctx.web.lists.get_by_title(library_name)
+            ctx.load(library)
+            ctx.execute_query()
+            
+            # Get the root folder
+            root_folder = library.root_folder
+            ctx.load(root_folder)
+            ctx.execute_query()
+            
+            logger.info(f"Root folder URL: {root_folder.serverRelativeUrl}")
+            
+            # Get the target folder
+            target_folder = root_folder
+            if folder_path:
+                # Extract just the folder path after the library name
+                parts = folder_path.split(library_name)
+                if len(parts) > 1:
+                    folder_path = parts[1]
+                
+                # Remove leading/trailing slashes
+                folder_path = folder_path.strip('/')
+                
+                logger.info(f"Target folder path: {folder_path}")
+                
+                # Get the folder by server relative URL
+                target_folder = ctx.web.get_folder_by_server_relative_url(f"{root_folder.serverRelativeUrl}/{folder_path}")
+                ctx.load(target_folder)
+                ctx.execute_query()
+            
+            # Upload the file content directly
+            target_file = target_folder.upload_file(filename, file_content).execute_query()
+
+            # Get the file object to update its status
+            file_obj = ctx.web.get_file_by_server_relative_url(target_file.serverRelativeUrl)
+            file_list_item = file_obj.listItemAllFields
+            ctx.load(file_list_item)
+            ctx.execute_query()
+            file_list_item.set_property('Status', 'Manual Review')
+            file_list_item.update()
+            ctx.execute_query()
+            
+            logger.info(f"✓ File uploaded successfully to SharePoint: {target_file.serverRelativeUrl}")
+
+            return target_file.serverRelativeUrl
+                
+        except Exception as ex:
+            logger.error(f"Error uploading content to SharePoint: {str(ex)}")
+            raise
+
     def upload_to_sharepoint(self, file_path, library_name, folder_path):
         try:
             ctx = self.get_client_context()
@@ -447,6 +580,12 @@ def main():
         ctx.execute_query()
         logger.info(f"Connected to SharePoint site: {web.properties['Title']}")
         
+        # Ensure Audit Log list exists
+        logger.info("🔍 Ensuring Audit Log list exists...")
+        if not sharepoint_service.ensure_audit_log_list_exists():
+            logger.error("❌ Failed to create or access Audit Log list")
+            return
+        
         # Get pending folders
         pending_folders = sharepoint_service.get_pending_folders()
         logger.info(f"Found {len(pending_folders)} folders with pending status")
@@ -461,32 +600,38 @@ def main():
                 for file in excel_files:
                     logger.info(f"  - {file['name']}")
                 
-                # Save files temporarily and run matching process
+                # Start audit logging for this folder
+                file_names = [file['name'] for file in excel_files]
+                audit_id = sharepoint_service.audit_logger.start_audit_entry(
+                    folder_id=folder['name'],
+                    insurer_name=folder['parent_folder'],
+                    file_names=file_names
+                )
+
+                # Process files directly from memory without saving to disk
                 try:
-                    # Create temporary directory if it doesn't exist
-                    temp_dir = "temp_excel_files"
-                    os.makedirs(temp_dir, exist_ok=True)
+                    # Determine which file is CBL and which is insurer
+                    cbl_file_content = None
+                    insurer_file_content = None
+                    cbl_file_name = None
+                    insurer_file_name = None
                     
-                    # Save files and determine which is CBL
-                    file_paths = []
-                    cbl_index = None
-                    for i, file in enumerate(excel_files):
-                        file_path = os.path.join(temp_dir, file['name'])
-                        with open(file_path, 'wb') as f:
-                            f.write(file['content'])
-                        file_paths.append(file_path)
+                    for file in excel_files:
                         if 'cbl' in file['name'].lower():
-                            cbl_index = i
+                            cbl_file_content = file['content']
+                            cbl_file_name = file['name']
+                        else:
+                            insurer_file_content = file['content']
+                            insurer_file_name = file['name']
                     
-                    # Ensure CBL file is first
-                    if cbl_index == 1:
-                        file_paths[0], file_paths[1] = file_paths[1], file_paths[0]
+                    if not cbl_file_content or not insurer_file_content:
+                        raise ValueError("Could not identify CBL and insurer files")
                     
                     # 🆕 CREATE DYNAMIC COLUMN MAPPINGS
                     logger.info(f"🎯 Creating dynamic column mappings for {folder['parent_folder']}...")
-                    column_mappings = sharepoint_service.create_hybrid_column_mappings(
-                        cbl_file_path=file_paths[0],
-                        insurer_file_path=file_paths[1],
+                    column_mappings = sharepoint_service.create_hybrid_column_mappings_from_content(
+                        cbl_file_content=cbl_file_content,
+                        insurer_file_content=insurer_file_content,
                         insurer_name=folder['parent_folder']
                     )
                     
@@ -506,95 +651,125 @@ def main():
                     
                     # Run matching process with dynamic configuration
                     logger.info(f"🚀 Running matching process with dynamic configuration...")
-                    result = run_matching_process(
-                        column_mappings=column_mappings,  # 🆕 DYNAMIC MAPPINGS
-                        matrix_keys=matrix_keys,          # 🆕 DYNAMIC MATRIX KEYS
-                        cbl_file=file_paths[0],
-                        insurer_file=file_paths[1], 
-                        output_file="output.xlsx"
-                    )
-                    
-                    # Upload the result to SharePoint
-                    if result and result.get('output_file'):
-                        logger.info(f"📤 Uploading results to SharePoint...")
-                        sharepoint_url = sharepoint_service.upload_to_sharepoint(
-                            result['output_file'],
-                            folder['library'],
-                            folder['url']
+                    try:
+                        result = run_matching_process(
+                            column_mappings=column_mappings,  # 🆕 DYNAMIC MAPPINGS
+                            matrix_keys=matrix_keys,          # 🆕 DYNAMIC MATRIX KEYS
+                            cbl_file=cbl_file_content,        # 🆕 FILE CONTENT FROM MEMORY
+                            insurer_file=insurer_file_content, # 🆕 FILE CONTENT FROM MEMORY
+                            output_file="output.xlsx"
                         )
-                        logger.info(f"✅ Results uploaded to SharePoint: {sharepoint_url}")
                         
-                        # Enhanced result summary
-                        logger.info(f"\n🎉 Processing complete for {folder['name']}!")
-                        logger.info(f"📊 Results Summary:")
-                        logger.info(f"   ✅ CBL Exact Matches: {result['cbl_stats']['exact_matches']}")
-                        logger.info(f"   🔄 CBL Partial Matches: {result['cbl_stats']['partial_matches']}")
-                        logger.info(f"   ❌ CBL No Matches: {result['cbl_stats']['no_matches']}")
-                        logger.info(f"   📈 Insurer Match Rate: {result['insurer_stats']['exact_match_rate']:.1f}%")
-                        logger.info(f"   💰 Exact Match Amount: ${result['cbl_stats']['exact_match_amount']:,.2f}")
+                        # Upload the result to SharePoint
+                        if result and result.get('output_content'):
+                            logger.info(f"📤 Uploading results to SharePoint...")
+                            sharepoint_url = sharepoint_service.upload_content_to_sharepoint(
+                                result['output_content'],
+                                result['output_file'],
+                                folder['library'],
+                                folder['url']
+                            )
+                            logger.info(f"✅ Results uploaded to SharePoint: {sharepoint_url}")
+                            
+                            # Enhanced result summary
+                            logger.info(f"\n🎉 Processing complete for {folder['name']}!")
+                            logger.info(f"📊 Results Summary:")
+                            logger.info(f"   ✅ CBL Exact Matches: {result['cbl_stats']['exact_matches']}")
+                            logger.info(f"   🔄 CBL Partial Matches: {result['cbl_stats']['partial_matches']}")
+                            logger.info(f"   ❌ CBL No Matches: {result['cbl_stats']['no_matches']}")
+                            logger.info(f"   📈 Insurer Match Rate: {result['insurer_stats']['exact_match_rate']:.1f}%")
+                            logger.info(f"   💰 Exact Match Amount: ${result['cbl_stats']['exact_match_amount']:,.2f}")
+                            
+                            # Complete audit logging with success
+                            audit_stats = create_audit_statistics(result)
+                            sharepoint_service.audit_logger.complete_audit_entry(
+                                status='Completed',
+                                match_statistics=audit_stats
+                            )
+                            
+                            # Update folder status to "Manual Review"
+                            try:
+                                sharepoint_service.update_folder_status(folder['url'], 'Manual Review')
+                            except Exception as e:
+                                logger.error(f"Error updating folder status: {str(e)}")
+                            
+                            # Update status of both input Excel files to "Manual Review"
+                            for file in excel_files:
+                                try:
+                                    sharepoint_service.update_file_status(file['url'], 'Manual Review')
+                                except Exception as e:
+                                    logger.error(f"Error updating file status: {str(e)}")
+                        else:
+                            logger.error(f"❌ Matching process completed but no output file generated")
+                            # Complete audit logging with failure
+                            sharepoint_service.audit_logger.complete_audit_entry(
+                                status='Failed',
+                                error_details="Matching process failed to generate output file"
+                            )
+                            raise Exception("Matching process failed to generate output file")
+                            
+                    except Exception as matching_error:
+                        logger.error(f"❌ Matching process failed for {folder['name']}: {str(matching_error)}")
+                        logger.error(f"Error details: {type(matching_error).__name__}")
                         
-                        # Update folder status to "Manual Review"
+                        # Complete audit logging with failure
+                        sharepoint_service.audit_logger.complete_audit_entry(
+                            status='Failed',
+                            error_details=f"Matching process failed: {str(matching_error)}"
+                        )
+                        
+                        # Update folder status to "Failed"
                         try:
-                            folder_obj = ctx.web.get_folder_by_server_relative_url(folder['url'])
-                            folder_list_item = folder_obj.list_item_all_fields
-                            ctx.load(folder_list_item)
-                            ctx.execute_query()
-                            folder_list_item.set_property('Status', 'Manual Review')
-                            folder_list_item.update()
-                            ctx.execute_query()
-                            logger.info(f"✅ Updated folder status to 'Manual Review': {folder['name']}")
+                            sharepoint_service.update_folder_status(folder['url'], 'Failed')
                         except Exception as e:
-                            logger.error(f"Error updating folder status: {str(e)}")
+                            logger.error(f"Error updating folder status to Failed: {str(e)}")
                         
-                        # Update status of both input Excel files to "Manual Review"
+                        # Update status of both input Excel files to "Failed"
                         for file in excel_files:
                             try:
-                                file_obj = ctx.web.get_file_by_server_relative_url(file['url'])
-                                file_list_item = file_obj.listItemAllFields
-                                ctx.load(file_list_item)
-                                ctx.execute_query()
-                                file_list_item.set_property('Status', 'Manual Review')
-                                file_list_item.update()
-                                ctx.execute_query()
-                                logger.info(f"✅ Updated file status to 'Manual Review': {file['name']}")
+                                sharepoint_service.update_file_status(file['url'], 'Failed')
                             except Exception as e:
-                                logger.error(f"Error updating file status: {str(e)}")
+                                logger.error(f"Error updating file status to Failed: {str(e)}")
+                        
+                        # Re-raise the error to be caught by the outer exception handler
+                        raise
                     
-                    # Clean up temporary files
-                    try:
-                        # First remove all files in the directory
-                        for file_path in file_paths:
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
-                        
-                        # Then remove the output file if it exists
-                        output_path = os.path.join(temp_dir, "output.xlsx")
-                        if os.path.exists(output_path):
-                            os.remove(output_path)
-                        
-                        # Finally remove the directory
-                        if os.path.exists(temp_dir):
-                            os.rmdir(temp_dir)
-                            
-                    except Exception as cleanup_error:
-                        logger.error(f"Error during cleanup: {str(cleanup_error)}")
-                        # Continue execution even if cleanup fails
+                    # No cleanup needed - files were processed from memory
                 
                 except Exception as e:
-                    logger.error(f"❌ Error processing Excel files: {str(e)}")
+                    logger.error(f"❌ Error processing Excel files for {folder['name']}: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
                     import traceback
-                    traceback.print_exc()
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
                     
-                    # Try to clean up even if there was an error
+                    # Complete audit logging with failure if audit was started
                     try:
-                        if 'file_paths' in locals():
-                            for file_path in file_paths:
-                                if os.path.exists(file_path):
-                                    os.remove(file_path)
-                        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-                            os.rmdir(temp_dir)
-                    except:
-                        pass
+                        if 'audit_id' in locals():
+                            sharepoint_service.audit_logger.complete_audit_entry(
+                                status='Failed',
+                                error_details=f"Excel file processing failed: {str(e)}"
+                            )
+                    except Exception as audit_error:
+                        logger.error(f"Error completing audit log: {str(audit_error)}")
+                    
+                    # Update folder and file statuses to "Failed" on any processing error
+                    try:
+                        # Update folder status to "Failed"
+                        sharepoint_service.update_folder_status(folder['url'], 'Failed')
+                    except Exception as status_error:
+                        logger.error(f"Error updating folder status to Failed: {str(status_error)}")
+                    
+                    # Update status of both input Excel files to "Failed"
+                    for file in excel_files:
+                        try:
+                            sharepoint_service.update_file_status(file['url'], 'Failed')
+                        except Exception as file_status_error:
+                            logger.error(f"Error updating file status to Failed: {str(file_status_error)}")
+                    
+                    # No cleanup needed - files were processed from memory
+                    
+                    # Continue processing other folders even if this one failed
+                    continue
             else:
                 logger.info(f"⚠️ Found {len(excel_files)} Excel files (expected 2) in {folder['name']}")
 
@@ -603,6 +778,10 @@ def main():
         import traceback
         traceback.print_exc()
         raise
+    finally:
+        # Log script completion
+        logger.info(f"\n🏁 Script execution completed at {datetime.datetime.now()}")
+        logger.info("📝 All audit logs have been saved to SharePoint Audit Log list")
 
 if __name__ == "__main__":
     main()

@@ -1255,13 +1255,14 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
         logger.info(f"    Match Type: {match_type} ({confidence} Confidence)")
         
         # Update all CBL records in the merged group
+        # All records in the merged group should have the SAME match status based on cluster totals
         for cbl_idx in cbl_indices:
             # Update group_id
             cbl_df.at[cbl_idx, 'group_id'] = new_group_id
             
-            # Update match reason to reflect merging
+            # Update match reason to reflect merging (use cluster-level difference)
             original_reason = cbl_df.at[cbl_idx, 'match_reason']
-            new_reason = f"{original_reason} (Merged from groups: {', '.join(original_group_ids)})"
+            new_reason = f"{original_reason} (Merged from groups: {', '.join(original_group_ids)}, Cluster Diff: Rs{difference:.2f})"
             cbl_df.at[cbl_idx, 'match_reason'] = new_reason
             
             # Update matched_insurer_indices to include all shared indices
@@ -1270,12 +1271,16 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
             # Update matched_amtdue_total to reflect the full insurer total
             cbl_df.at[cbl_idx, 'matched_amtdue_total'] = insurer_total
             
-            # Update amount_difference
-            cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
-            amount_diff = abs(cbl_amount + insurer_total)
-            cbl_df.at[cbl_idx, 'amount_difference'] = amount_diff
+            # Use cluster-level difference for all records (not individual differences)
+            cbl_df.at[cbl_idx, 'amount_difference'] = difference
             
-            logger.info(f"  ✓ Updated CBL {cbl_idx}: {match_type} match with {len(insurer_indices)} insurer records")
+            # Apply the cluster-level match status to ALL records in the merged group
+            if match_type == "EXACT":
+                cbl_df.at[cbl_idx, 'match_status'] = "Exact Match"
+            else:
+                cbl_df.at[cbl_idx, 'match_status'] = "Partial Match"
+            
+            logger.info(f"  ✓ Updated CBL {cbl_idx}: {match_type} match with {len(insurer_indices)} insurer records (cluster-level decision)")
     
     logger.info(f"\n✓ Group merging complete: {len(groups_to_merge)} groups merged into {merged_group_counter} merged groups")
     return cbl_df

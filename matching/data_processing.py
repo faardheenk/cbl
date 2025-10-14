@@ -4,10 +4,11 @@ import pandas as pd
 import logging
 import re
 from matrix import build_key
+import io
 
 logger = logging.getLogger(__name__)
 
-def detect_header_row(file_path, max_rows_to_check=20, sheet_name=0):
+def detect_header_row(file_content, max_rows_to_check=20, sheet_name=0):
     """
     Intelligently detect the header row in an Excel file by analyzing the structure.
     
@@ -18,18 +19,21 @@ def detect_header_row(file_path, max_rows_to_check=20, sheet_name=0):
     - Empty rows before actual data
     
     Args:
-        file_path (str): Path to the Excel file
+        file_content (bytes): Excel file content as bytes
         max_rows_to_check (int): Maximum number of rows to analyze for header detection
         sheet_name (str or int): Sheet name or index to analyze
         
     Returns:
         tuple: (header_row_index, column_names_list)
     """
-    logger.info(f"🔍 Detecting header row in: {file_path} (sheet: {sheet_name})")
+    import io
+    
+    logger.info(f"🔍 Detecting header row in memory content (sheet: {sheet_name})")
+    file_source = io.BytesIO(file_content)
     
     try:
         # Read the first several rows without treating any as headers
-        df_sample = pd.read_excel(file_path, sheet_name=sheet_name, header=None, nrows=max_rows_to_check)
+        df_sample = pd.read_excel(file_source, sheet_name=sheet_name, header=None, nrows=max_rows_to_check)
         
         logger.info(f"Analyzing first {len(df_sample)} rows for header detection...")
         
@@ -116,7 +120,7 @@ def detect_header_row(file_path, max_rows_to_check=20, sheet_name=0):
             header_row = best_candidate['row_index']
             
             # Extract column names from the identified header row
-            header_df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row, nrows=1)
+            header_df = pd.read_excel(file_source, sheet_name=sheet_name, header=header_row, nrows=1)
             column_names = list(header_df.columns)
             
             logger.info(f"✅ Detected header at row {header_row}")
@@ -126,14 +130,14 @@ def detect_header_row(file_path, max_rows_to_check=20, sheet_name=0):
         else:
             # Fallback: assume first row with data
             logger.warning("⚠️ Could not confidently detect header row, using row 0")
-            header_df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, nrows=1)
+            header_df = pd.read_excel(file_source, sheet_name=sheet_name, header=0, nrows=1)
             return 0, list(header_df.columns)
             
     except Exception as e:
         logger.error(f"❌ Error during header detection: {str(e)}")
         logger.info("🔄 Falling back to default header detection (row 0)")
         try:
-            header_df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, nrows=1)
+            header_df = pd.read_excel(file_source, sheet_name=sheet_name, header=0, nrows=1)
             return 0, list(header_df.columns)
         except:
             return 0, []
@@ -172,7 +176,7 @@ def compare_column_structures(columns1, columns2, similarity_threshold=0.8):
     
     return is_similar, similarity_score, common_columns
 
-def read_excel_with_smart_headers(file_path, **kwargs):
+def read_excel_with_smart_headers(file_content, **kwargs):
     """
     Read Excel file with intelligent header detection and multi-sheet support.
     
@@ -184,24 +188,27 @@ def read_excel_with_smart_headers(file_path, **kwargs):
     5. Returns a single consolidated DataFrame
     
     Args:
-        file_path (str): Path to Excel file
+        file_content (bytes): Excel file content as bytes
         **kwargs: Additional arguments to pass to pd.read_excel
         
     Returns:
         pandas.DataFrame: DataFrame with properly detected headers and merged sheets
     """
-    logger.info(f"📖 Reading Excel file with smart header detection: {file_path}")
+
+    
+    logger.info(f"📖 Reading Excel file from memory with smart header detection")
+    file_source = io.BytesIO(file_content)
     
     try:
         # Get all sheet names
-        excel_file = pd.ExcelFile(file_path)
+        excel_file = pd.ExcelFile(file_source)
         sheet_names = excel_file.sheet_names
         
         logger.info(f"📋 Found {len(sheet_names)} sheet(s): {sheet_names}")
         
         if len(sheet_names) == 1:
             # Single sheet - use existing logic
-            return _read_single_sheet_with_smart_headers(file_path, sheet_names[0], **kwargs)
+            return _read_single_sheet_with_smart_headers(file_content, sheet_names[0], **kwargs)
         
         # Multiple sheets - analyze and potentially merge
         sheet_data = {}
@@ -212,10 +219,10 @@ def read_excel_with_smart_headers(file_path, **kwargs):
             logger.info(f"🔍 Processing sheet: {sheet_name}")
             try:
                 # Detect header row for this sheet
-                header_row, column_names = detect_header_row(file_path, sheet_name=sheet_name)
+                header_row, column_names = detect_header_row(file_content, sheet_name=sheet_name)
                 
                 # Read the sheet with detected header
-                df = _read_single_sheet_with_smart_headers(file_path, sheet_name, **kwargs)
+                df = _read_single_sheet_with_smart_headers(file_content, sheet_name, **kwargs)
                 
                 if len(df) > 0:  # Only include non-empty sheets
                     sheet_data[sheet_name] = df
@@ -270,14 +277,14 @@ def read_excel_with_smart_headers(file_path, **kwargs):
         logger.error(f"❌ Error reading Excel file: {str(e)}")
         # Fallback to single sheet reading
         logger.info("🔄 Falling back to single sheet reading...")
-        return _read_single_sheet_with_smart_headers(file_path, 0, **kwargs)
+        return _read_single_sheet_with_smart_headers(file_content, 0, **kwargs)
 
-def _read_single_sheet_with_smart_headers(file_path, sheet_name, **kwargs):
+def _read_single_sheet_with_smart_headers(file_content, sheet_name, **kwargs):
     """
     Read a single sheet with smart header detection.
     
     Args:
-        file_path (str): Path to Excel file
+        file_content (bytes): Excel file content as bytes
         sheet_name (str or int): Sheet name or index
         **kwargs: Additional arguments to pass to pd.read_excel
         
@@ -285,12 +292,15 @@ def _read_single_sheet_with_smart_headers(file_path, sheet_name, **kwargs):
         pandas.DataFrame: DataFrame with properly detected headers
     """
     # Detect the header row for this specific sheet
-    header_row, column_names = detect_header_row(file_path, sheet_name=sheet_name)
+    header_row, column_names = detect_header_row(file_content, sheet_name=sheet_name)
     
     # Read the file with the detected header
+    import io
+    file_source = io.BytesIO(file_content)
+    
     if header_row > 0:
         # Skip rows before the header and use the detected row as header
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row, **kwargs)
+        df = pd.read_excel(file_source, sheet_name=sheet_name, header=header_row, **kwargs)
         
         # Clean up any duplicate header rows that might have been included
         # Remove rows where the first column matches the column name (duplicate headers)
@@ -300,7 +310,7 @@ def _read_single_sheet_with_smart_headers(file_path, sheet_name, **kwargs):
         
     else:
         # Use regular reading
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row, **kwargs)
+        df = pd.read_excel(file_source, sheet_name=sheet_name, header=header_row, **kwargs)
     
     # Remove completely empty rows
     df = df.dropna(how='all')

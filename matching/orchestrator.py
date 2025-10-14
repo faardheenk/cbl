@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import pandas as pd
 import argparse
 import logging
@@ -8,6 +7,7 @@ from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
 from .output_handler import explode_and_merge
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +19,13 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
     Args:
         column_mappings: Dictionary containing column mappings for CBL and insurer data
         matrix_keys: Dictionary containing matrix key configurations
-        cbl_file (str, optional): Path to the CBL Excel file. If None, will be prompted.
-        insurer_file (str, optional): Path to the insurer Excel file. If None, will be prompted.
+        cbl_file (bytes, optional): CBL Excel file content as bytes. If None, will be prompted.
+        insurer_file (bytes, optional): Insurer Excel file content as bytes. If None, will be prompted.
         output_file (str, optional): Output Excel file name. Defaults to 'output.xlsx'.
         tolerance (int, optional): Tolerance for amount matching. Defaults to 100.
         
     Returns:
-        dict: Results dictionary containing match statistics and output information
+        dict: Results dictionary containing match statistics and output file content as bytes
     """
     logger.info("\n=== Starting Matching Process ===")
     
@@ -49,9 +49,8 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
         
         logger.info(f"DEBUG: After column filtering - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
 
-        # Get the directory of the input files
-        input_dir = os.path.dirname(os.path.abspath(cbl_file))
-        output_path = os.path.join(input_dir, output_file)
+        # Generate output in memory (no local file saving)
+        output_filename = output_file
 
         # Process the data
         clean_cbl, clean_insurer = preprocess(cbl_df, insurer_df, column_mappings, matrix_keys)
@@ -153,15 +152,16 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             clean_cbl = clean_cbl.reset_index(drop=True)
 
         # Generate output and statistics
-        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_path)
+        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename)
 
     except Exception as e:
         logger.error(f"\nError: {str(e)}")
         raise
 
 
-def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
+def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     """Generate output files and calculate statistics."""
+
     # Track insurer indices by match type
     exact_match_insurer_indices = set()
     partial_match_insurer_indices = set()
@@ -381,9 +381,10 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
         logger.error(f"Error accessing unmatched insurer indices: {str(e)}")
         not_found_insurer_only = pd.DataFrame()
 
-    # Write to Excel with 6 separate sheets
+    # Write to Excel in memory with 6 separate sheets
     try: 
-        with pd.ExcelWriter(output_path) as writer:
+        output_buffer = io.BytesIO()
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
             # CBL sheets (CBL data only)
             exact_matches_cbl_only.to_excel(writer, sheet_name="exact match cbl", index=False)
             partial_matches_cbl_only.to_excel(writer, sheet_name="partial match cbl", index=False)
@@ -399,11 +400,17 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
             partial_matches.to_excel(writer, sheet_name="Partial Matches", index=False)
             no_matches.to_excel(writer, sheet_name="No Matches CBL", index=False)
             unmatched_insurer.to_excel(writer, sheet_name="No Matches Insurer", index=False)
+        
+        # Get the Excel file content as bytes
+        output_buffer.seek(0)
+        excel_content = output_buffer.getvalue()
+        output_buffer.close()
+        
     except Exception as e:
         logger.error(f"Error writing to Excel: {str(e)}")
         raise
 
-    logger.info(f"✓ Results saved to: {output_path}")
+    logger.info(f"✓ Results generated in memory: {output_filename}")
 
     logger.info("\n=== Final Results ===")
     logger.info(f"✓ CBL Records:")
@@ -416,7 +423,7 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
     logger.info(f"  - Exact match insurer rows: {exact_match_insurer_count} ({exact_match_insurer_count/total_insurer_rows*100:.1f}%)")
     logger.info(f"  - Partial match insurer rows: {partial_match_insurer_count} ({partial_match_insurer_count/total_insurer_rows*100:.1f}%)")
     logger.info(f"  - Unmatched insurer rows: {unmatched_insurer_count} ({unmatched_insurer_count/total_insurer_rows*100:.1f}%)")
-    logger.info(f"✓ Results saved to: {output_path}")
+    logger.info(f"✓ Results generated in memory: {output_filename}")
 
    
     # Calculate amounts for different match types (ensure numeric conversion)
@@ -456,7 +463,8 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_path):
         'partial_matches': partial_matches,
         'no_matches': no_matches,
         'unmatched_insurer': unmatched_insurer,
-        'output_file': output_path,
+        'output_file': output_filename,
+        'output_content': excel_content,
         'cbl_stats': {
             'exact_matches': len(clean_cbl[clean_cbl['match_status'] == 'Exact Match']),
             'partial_matches': len(clean_cbl[clean_cbl['match_status'] == 'Partial Match']),
