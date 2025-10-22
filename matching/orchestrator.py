@@ -100,31 +100,31 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                 logger.info(f"📊 After Pass 1: {global_tracker.get_usage_summary()}")
             
             # Pass 2: Requires PolicyNo and ProcessedAmount (CBL) + ProcessedAmount and at least one PolicyNo (Insurer) - Name matching removed
-            cbl_has_pass2 = has_required_keys(['PolicyNo', 'ProcessedAmount'], [])
-            insurer_has_pass2_base = has_required_keys([], ['ProcessedAmount'])
+            # cbl_has_pass2 = has_required_keys(['PolicyNo', 'ProcessedAmount'], [])
+            # insurer_has_pass2_base = has_required_keys([], ['ProcessedAmount'])
             
-            # Check if insurer has at least one policy number column mapped
-            insurer_mappings = column_mappings.get('insurer_mappings', {})
-            has_policy1 = any(target == 'PolicyNo_1' for target in insurer_mappings.values())
-            has_policy2 = any(target == 'PolicyNo_2' for target in insurer_mappings.values()) 
-            insurer_has_policy = has_policy1 or has_policy2
+            # # Check if insurer has at least one policy number column mapped
+            # insurer_mappings = column_mappings.get('insurer_mappings', {})
+            # has_policy1 = any(target == 'PolicyNo_1' for target in insurer_mappings.values())
+            # has_policy2 = any(target == 'PolicyNo_2' for target in insurer_mappings.values()) 
+            # insurer_has_policy = has_policy1 or has_policy2
             
-            if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
-                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking (Name matching removed)")
-                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, global_tracker)
-            else:
-                missing_keys = []
-                if not cbl_has_pass2:
-                    missing_keys.append("CBL: PolicyNo, ProcessedAmount")
-                if not insurer_has_pass2_base:
-                    missing_keys.append("Insurer: ProcessedAmount")
-                if not insurer_has_policy:
-                    missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
-                logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
+            # if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
+            #     logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking (Name matching removed)")
+            #     clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, global_tracker)
+            # else:
+            #     missing_keys = []
+            #     if not cbl_has_pass2:
+            #         missing_keys.append("CBL: PolicyNo, ProcessedAmount")
+            #     if not insurer_has_pass2_base:
+            #         missing_keys.append("Insurer: ProcessedAmount")
+            #     if not insurer_has_policy:
+            #         missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
+            #     logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
             
-            # Log global tracker status after Pass 2
-            if global_tracker:
-                logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
+            # # Log global tracker status after Pass 2
+            # if global_tracker:
+            #     logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
             
             # Pass 3: Requires ClientName and ProcessedAmount
             if has_required_keys(['ClientName', 'ProcessedAmount'], ['ClientName', 'ProcessedAmount']):

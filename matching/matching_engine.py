@@ -2,11 +2,123 @@
 
 import pandas as pd
 import logging
-from itertools import combinations
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Set
 from fuzzywuzzy import fuzz
+import re
+from itertools import combinations
 from .utils import add_pass, extract_policy_tokens
 
 logger = logging.getLogger(__name__)
+
+
+class CompanyNameMatcher:
+    """
+    VITIRO LTD FIX: Intelligent company name matcher that prevents over-clustering
+    of companies mentioned in financial agreements.
+    
+    This class extracts primary company names from financial relationships
+    (e.g., "SPICE FINANCE LTD ON LEASE TO VITIRO LTD" -> "VITIRO LTD")
+    and applies intelligent penalties to prevent over-clustering.
+    
+    OPTIMIZED: Uses caching and early exits for performance on large datasets.
+    """
+    
+    FINANCIAL_PATTERNS = [
+        (r'(.+?)\s+ON\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'lease_to'),
+        (r'(.+?)\s+ON\s+FINANCE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_to'),
+        (r'(.+?)\s+ON\s+FINANCIAL\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'financial_lease'),
+        (r'(.+?)\s+ON\s+\(FINANCE\)\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_lease_paren'),
+        (r'(.+?)\s+-\s+\([^)]*FINANCE\s+LEASE[^)]*\)$', 'finance_lease_suffix'),
+    ]
+    
+    def __init__(self, primary_penalty: float = 0.3, exact_match_boost: float = 2.5):
+        self.primary_penalty = primary_penalty
+        self.exact_match_boost = exact_match_boost
+        # Cache for primary company extraction to avoid repeated regex matching
+        self._primary_cache = {}
+    
+    def extract_primary_company(self, name: str) -> Tuple[str, str]:
+        """Extract primary company from complex company name strings (with caching)."""
+        if not name or pd.isna(name):
+            return "", "unknown"
+        
+        name_upper = str(name).strip().upper()
+        
+        # Check cache first - fast path
+        if name_upper in self._primary_cache:
+            return self._primary_cache[name_upper]
+        
+        # Quick check: if no financial keywords, skip regex entirely
+        has_financial_keyword = any(keyword in name_upper for keyword in 
+                                   ['ON LEASE', 'ON FINANCE', 'FINANCE LEASE', '(FINANCE)', 'ON (FINANCE)'])
+        
+        if not has_financial_keyword:
+            result = (name_upper, "direct")
+            self._primary_cache[name_upper] = result
+            return result
+        
+        # Only do regex matching if financial keywords found
+        for pattern, relationship_type in self.FINANCIAL_PATTERNS:
+            match = re.search(pattern, name_upper, re.IGNORECASE)
+            if match:
+                if match.lastindex and match.lastindex >= 2:
+                    primary = match.group(2).strip()
+                    result = (primary, relationship_type)
+                    self._primary_cache[name_upper] = result
+                    return result
+                elif match.lastindex == 1:
+                    primary = match.group(1).strip()
+                    result = (primary, relationship_type)
+                    self._primary_cache[name_upper] = result
+                    return result
+        
+        result = (name_upper, "direct")
+        self._primary_cache[name_upper] = result
+        return result
+    
+    def calculate_intelligent_similarity(self, name1: str, name2: str) -> float:
+        """Calculate intelligent similarity with financial relationship awareness (optimized)."""
+        if not name1 or not name2 or pd.isna(name1) or pd.isna(name2):
+            return 0.0
+        
+        name1_upper = str(name1).strip().upper()
+        name2_upper = str(name2).strip().upper()
+        
+        # OPTIMIZATION: Quick exit for identical names
+        if name1_upper == name2_upper:
+            return 250.0  # Boosted exact match
+        
+        # OPTIMIZATION: Quick exit for names with no common characters
+        # This catches obviously different companies early
+        if not set(name1_upper) & set(name2_upper):
+            return 0.0
+        
+        # OPTIMIZATION: Quick base similarity check before expensive operations
+        base_similarity = fuzz.token_set_ratio(name1_upper, name2_upper)
+        
+        # OPTIMIZATION: Early exit for very low similarity - not worth further checks
+        if base_similarity < 50:
+            return base_similarity
+        
+        # Only do primary company extraction if base similarity is promising
+        # Pass ORIGINAL names (not uppercase) to extract_primary_company for proper extraction
+        primary1, rel_type1 = self.extract_primary_company(name1)
+        primary2, rel_type2 = self.extract_primary_company(name2)
+        
+        # VITIRO LTD FIX: If both names have financial relationships to different companies,
+        # apply penalty to prevent over-clustering
+        if rel_type1 != "direct" and rel_type2 != "direct":
+            if primary1 != primary2:
+                base_similarity *= self.primary_penalty
+        
+        primary_similarity = fuzz.token_set_ratio(primary1, primary2)
+        
+        # Boost exact matches
+        if primary1 == primary2:
+            primary_similarity *= self.exact_match_boost
+        
+        return max(base_similarity, primary_similarity)
 
 
 class GlobalMatchTracker:
@@ -392,26 +504,16 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     
     # Extract and normalize names
     names_with_indices = []
-    princes_tuna_found = []
     for idx, row in df.iterrows():
         name = str(row.get(name_column, '')).upper().strip()
         if name and name != 'NAN':
             names_with_indices.append((idx, name))
-            # Debug: Track PRINCES TUNA records
-            if 'PRINCES TUNA' in name:
-                princes_tuna_found.append((idx, name))
     
     if not names_with_indices:
         logger.info("No valid names found for clustering")
         return {}
     
     logger.info(f"Found {len(names_with_indices)} valid names to cluster")
-    
-    # Debug: Log PRINCES TUNA records found
-    if princes_tuna_found:
-        logger.info(f"\n🔍 DEBUG - {prefix} PRINCES TUNA Records Found in Clustering:")
-        for idx, name in princes_tuna_found:
-            logger.info(f"  Index {idx}: '{name}'")
     
     # Union-Find data structure for clustering
     parent = {idx: idx for idx, _ in names_with_indices}
@@ -433,31 +535,22 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     comparisons = 0
     unions_performed = 0
     
+    # VITIRO LTD FIX: Use intelligent company name matcher
+    # Create matcher ONCE to leverage caching across all comparisons
+    matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
+    
     for i, (idx1, name1) in enumerate(names_with_indices):
         for idx2, name2 in names_with_indices[i+1:]:
             comparisons += 1
             
-            # Calculate fuzzy similarity using token_set_ratio for better company name matching
-            similarity = fuzz.token_set_ratio(name1, name2)
+            # VITIRO LTD FIX: Use intelligent similarity calculation
+            # This prevents over-clustering of companies with financial relationships
+            similarity = matcher.calculate_intelligent_similarity(name1, name2)
             
-            # Debug: Log PRINCES TUNA comparisons
-            if 'PRINCES TUNA' in name1 and 'PRINCES TUNA' in name2:
-                logger.info(f"\n🔍 DEBUG - {prefix} PRINCES TUNA Comparison:")
-                logger.info(f"  Name 1 (idx {idx1}): '{name1}'")
-                logger.info(f"  Name 2 (idx {idx2}): '{name2}'")
-                logger.info(f"  Similarity: {similarity}% (threshold: {fuzzy_threshold}%)")
-                logger.info(f"  Will cluster: {similarity >= fuzzy_threshold}")
-            
+            # Union if similarity meets threshold
             if similarity >= fuzzy_threshold:
-                # These names are similar - cluster them together
-                if find(idx1) != find(idx2):
-                    union(idx1, idx2)
-                    unions_performed += 1
-                    # Debug: Log PRINCES TUNA unions
-                    if 'PRINCES TUNA' in name1 or 'PRINCES TUNA' in name2:
-                        logger.info(f"✓ Clustered PRINCES TUNA: '{name1[:50]}' ↔ '{name2[:50]}' (Similarity: {similarity}%)")
-                    else:
-                        logger.debug(f"Clustered: '{name1[:50]}' ↔ '{name2[:50]}' (Similarity: {similarity}%)")
+                union(idx1, idx2)
+                unions_performed += 1
     
     logger.info(f"Performed {comparisons} comparisons, created {unions_performed} unions")
     
@@ -484,13 +577,6 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     logger.info(f"  - Single-record clusters: {sum(1 for v in name_clusters.values() if len(v) == 1)}")
     logger.info(f"  - Multi-record clusters: {sum(1 for v in name_clusters.values() if len(v) > 1)}")
     
-    # Debug: Log PRINCES TUNA clusters
-    princes_tuna_clusters = {k: v for k, v in name_clusters.items() if 'PRINCES TUNA' in k}
-    if princes_tuna_clusters:
-        logger.info(f"\n🔍 DEBUG - {prefix} PRINCES TUNA Clusters Found:")
-        for cluster_name, indices in princes_tuna_clusters.items():
-            logger.info(f"  Cluster: '{cluster_name}'")
-            logger.info(f"  Indices: {indices} ({len(indices)} records)")
     
     # Log details of multi-record clusters
     multi_clusters = {k: v for k, v in name_clusters.items() if len(v) > 1}
@@ -673,7 +759,6 @@ def deduplicate_partial_matches(cbl_df, overlap_threshold=0.8, group_by_name=Tru
     """
     logger.warning("⚠️ deduplicate_partial_matches() is DEPRECATED - use Pass 3 name grouping instead")
     return cbl_df
-
 
 def _handle_conflict_resolution(cbl_df, insurer_df, match, used_insurer_indices, tolerance, pass_number, global_tracker, fallback_rows=None):
     """

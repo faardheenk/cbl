@@ -37,7 +37,7 @@ def main():
         {
             'cbl_file': "data/SOA CBL.xlsx",
             'insurer_file': "data/EI MERGE.xlsx",
-            'output_file': "RESULT_SOA_EI_LATEST.xlsx",
+            'output_file': "data/RESULT_SOA_EI_LATEST.xlsx",
             'description': "SOA CBL + EI MERGE"
         },
         # {
@@ -145,15 +145,31 @@ def main():
         start_time = datetime.now()
         logger.info(f"🚀 Starting matching process at {start_time.strftime('%H:%M:%S')}")
         
+        # Read files as bytes for the matching process
+        logger.info("📖 Reading files as bytes for matching process...")
+        with open(cbl_file, 'rb') as f:
+            cbl_file_content = f.read()
+        with open(insurer_file, 'rb') as f:
+            insurer_file_content = f.read()
+        
         # Run the enhanced matching process
         results = run_matching_process(
             column_mappings=column_mappings,
             matrix_keys=matrix_keys,
-            cbl_file=cbl_file,
-            insurer_file=insurer_file,
+            cbl_file=cbl_file_content,
+            insurer_file=insurer_file_content,
             output_file=output_file,
             tolerance=100
         )
+        
+        # Write the output file to disk
+        if results and 'output_content' in results:
+            logger.info(f"💾 Writing output file to disk: {output_file}")
+            with open(output_file, 'wb') as f:
+                f.write(results['output_content'])
+            logger.info(f"✅ Output file saved successfully: {output_file}")
+        else:
+            logger.error("❌ No output content to save")
         
         end_time = datetime.now()
         duration = end_time - start_time
