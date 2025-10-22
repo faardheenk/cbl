@@ -27,6 +27,7 @@ class CompanyNameMatcher:
     FINANCIAL_PATTERNS = [
         (r'(.+?)\s+ON\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'lease_to'),
         (r'(.+?)\s+ON\s+FINANCE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_to'),
+        (r'(.+?)\s+ON\s+FINANCE\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_lease'),
         (r'(.+?)\s+ON\s+FINANCIAL\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'financial_lease'),
         (r'(.+?)\s+ON\s+\(FINANCE\)\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_lease_paren'),
         (r'(.+?)\s+-\s+\([^)]*FINANCE\s+LEASE[^)]*\)$', 'finance_lease_suffix'),
@@ -51,7 +52,8 @@ class CompanyNameMatcher:
         
         # Quick check: if no financial keywords, skip regex entirely
         has_financial_keyword = any(keyword in name_upper for keyword in 
-                                   ['ON LEASE', 'ON FINANCE', 'FINANCE LEASE', '(FINANCE)', 'ON (FINANCE)'])
+                                   ['ON LEASE', 'ON FINANCE', 'FINANCE LEASE', 'FINANCIAL LEASE', 
+                                    '(FINANCE)', 'ON (FINANCE)'])
         
         if not has_financial_keyword:
             result = (name_upper, "direct")

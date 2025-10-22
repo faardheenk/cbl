@@ -34,18 +34,18 @@ def main():
     
     # File configuration with auto-detection
     file_options = [
-        {
-            'cbl_file': "data/SOA CBL.xlsx",
-            'insurer_file': "data/EI MERGE.xlsx",
-            'output_file': "data/RESULT_SOA_EI_LATEST.xlsx",
-            'description': "SOA CBL + EI MERGE"
-        },
         # {
-        #     'cbl_file': "data/Demo_Input1.xlsx",
-        #     'insurer_file': "data/Demo_Input2.xlsx",
-        #     'output_file': "RESULT_DEMO_LATEST.xlsx",
-        #     'description': "Demo files (simplest test)"
+        #     'cbl_file': "data/SOA CBL.xlsx",
+        #     'insurer_file': "data/EI MERGE.xlsx",
+        #     'output_file': "data/RESULT_SOA_EI_LATEST.xlsx",
+        #     'description': "SOA CBL + EI MERGE"
         # },
+        {
+            'cbl_file': "data/vitiro cbl.xlsx",
+            'insurer_file': "data/vitiro el.xlsx",
+            'output_file': "data/RESULT_VITIRO_LATEST.xlsx",
+            'description': "Demo files (simplest test)"
+        },
         # {
         #     'cbl_file': "data/CBL RECON REVIEW.xlsx",
         #     'insurer_file': "data/SWAN RECON REVIEW.xlsx", 
