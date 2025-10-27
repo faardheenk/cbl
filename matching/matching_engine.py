@@ -1381,6 +1381,11 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
     exact_matches = 0
     partial_matches = 0
     
+    # Initialize group_id column if it doesn't exist
+    if 'group_id' not in cbl_df.columns:
+        cbl_df['group_id'] = None
+        logger.info("Initialized group_id column")
+    
     logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
     logger.info(f"Name Clustering Threshold: {fuzzy_threshold}%")
 
