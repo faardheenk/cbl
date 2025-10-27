@@ -34,12 +34,12 @@ def main():
     
     # File configuration with auto-detection
     file_options = [
-        # {
-        #     'cbl_file': "data/SOA CBL.xlsx",
-        #     'insurer_file': "data/EI MERGE.xlsx",
-        #     'output_file': "data/RESULT_SOA_EI_LATEST.xlsx",
-        #     'description': "SOA CBL + EI MERGE"
-        # },
+        {
+            'cbl_file': "data/SOA CBL.xlsx",
+            'insurer_file': "data/EI MERGE.xlsx",
+            'output_file': "data/RESULT_SOA_EI_LATEST.xlsx",
+            'description': "SOA CBL + EI MERGE"
+        },
         # {
         #     'cbl_file': "data/vitiro cbl.xlsx",
         #     'insurer_file': "data/vitiro el.xlsx",
@@ -52,12 +52,12 @@ def main():
         #     'output_file': "data/RESULT_TEST_GROUPING_LATEST.xlsx",
         #     'description': "Recon review files"
         # },
-        {
-            'cbl_file': "data/CBL 12 SEP.xlsx",
-            'insurer_file': "data/SWAN 12 SEP.xlsx",
-            'output_file': "data/RESULT_CBL_12_SEP_SWAN_12_SEP_LATEST.xlsx",
-            'description': "Main CBL/SWAN files"
-        }
+        # {
+        #     'cbl_file': "data/CBL 12 SEP.xlsx",
+        #     'insurer_file': "data/SWAN 12 SEP.xlsx",
+        #     'output_file': "data/RESULT_CBL_12_SEP_SWAN_12_SEP_LATEST.xlsx",
+        #     'description': "Main CBL/SWAN files"
+        # }
     ]
     
     # Find the first available file set
@@ -109,10 +109,10 @@ def main():
         },
         'insurer_mappings': {
             # Princess Tuna Insurer mappings
-            # "Policy Ref": "PlacingNo",
-            # "Policy Number": "PolicyNo_1",
-            # "Insured Name": "ClientName",
-            # "Equivalent in MUR": "ProcessedAmount",
+            "Policy Ref": "PlacingNo",
+            "Policy Number": "PolicyNo_1",
+            "Insured Name": "ClientName",
+            "Equivalent in MUR": "ProcessedAmount",
             
             # # Demo file mappings
             # "REF": "PlacingNo",
@@ -121,11 +121,11 @@ def main():
             # "AMTDUE": "Amount",
             
             # # SWAN file mappings
-            "BRKREF": "PlacingNo",
-            "CLIENT NAME": "ClientName", 
-            "DOCSER": "PolicyNo_1",
-            "POLSER": "PolicyNo_2",
-            "AMTDUE": "ProcessedAmount"
+            # "BRKREF": "PlacingNo",
+            # "NAME": "ClientName",
+            # "DOCSER": "PolicyNo_1",
+            # "POLSER": "PolicyNo_2",
+            # "AMTDUE": "ProcessedAmount"
         }
     }
 

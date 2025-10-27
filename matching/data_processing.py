@@ -604,11 +604,11 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
     insurer_column_suffix_map = {col: col + '_INSURER' for col in insurer_columns}
     insurer_df = insurer_df.rename(columns=insurer_column_suffix_map)
     
-    # Log available columns after renaming for debugging
+    # Log available columns after renaming
     logger.info(f"Available insurer columns after renaming: {list(insurer_df.columns)}")
 
     # Clean and process data dynamically based on available columns
-    logger.info(f"DEBUG: Before data cleaning - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
+    logger.info(f"Before data cleaning - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
     
     # Clean CBL columns dynamically
     if "PlacingNo" in cbl_df.columns:
@@ -717,7 +717,15 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
     if "ProcessedAmount_INSURER" in insurer_df.columns:
         insurer_df["ProcessedAmount_Clean_INSURER"] = pd.to_numeric(insurer_df["ProcessedAmount_INSURER"], errors="coerce")
     
-    logger.info(f"DEBUG: After data cleaning - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
+    # Clean insurer client names for Pass 3 name clustering
+    if "ClientName_INSURER" in insurer_df.columns:
+        insurer_df["ClientName_Clean_INSURER"] = insurer_df["ClientName_INSURER"].astype(str).str.upper().str.strip()
+        insurer_df["ClientName_Clean_INSURER"] = insurer_df["ClientName_Clean_INSURER"].str.replace(pattern, '', regex=True)
+        logger.info("✓ Created ClientName_Clean_INSURER column for insurer name clustering")
+    else:
+        logger.warning("⚠ ClientName_INSURER column not found - Pass 3 name clustering may not work properly")
+    
+    logger.info(f"After data cleaning - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
     
     # Handle optional PolicyNo_2 column dynamically
     if "PolicyNo_2_INSURER" in insurer_df.columns:

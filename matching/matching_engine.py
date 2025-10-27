@@ -50,6 +50,13 @@ class CompanyNameMatcher:
         if name_upper in self._primary_cache:
             return self._primary_cache[name_upper]
         
+        # COMPOUND NAME HANDLING: Extract primary entity from compound names first
+        if _is_compound_name(name_upper):
+            primary_entity = _extract_primary_entity(name_upper)
+            result = (primary_entity, "compound")
+            self._primary_cache[name_upper] = result
+            return result
+        
         # Quick check: if no financial keywords, skip regex entirely
         has_financial_keyword = any(keyword in name_upper for keyword in 
                                    ['ON LEASE', 'ON FINANCE', 'FINANCE LEASE', 'FINANCIAL LEASE', 
@@ -481,12 +488,70 @@ def classify_amount_match(amt1, amt2, tolerance):
         return "NO_MATCH", difference, "None"
 
 
+def _is_compound_name(name):
+    """
+    Check if a name is a compound name with multiple entities.
+    
+    Compound names contain multiple companies joined by &/OR, AND/OR, etc.
+    Example: "COMPANY A LTD &/OR COMPANY B LTD &/OR COMPANY C LTD"
+    
+    Args:
+        name: Company name string
+        
+    Returns:
+        bool: True if compound name, False otherwise
+    """
+    if not name:
+        return False
+    
+    # Check for common compound name patterns
+    compound_indicators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/']
+    return any(indicator in name.upper() for indicator in compound_indicators)
+
+
+def _extract_primary_entity(name):
+    """
+    Extract the primary entity from a compound name.
+    
+    For compound names, extracts the FIRST entity before the first "&/OR".
+    This prevents over-clustering by focusing on the primary company.
+    
+    Args:
+        name: Company name (potentially compound)
+        
+    Returns:
+        str: Primary entity name
+    """
+    if not name or not _is_compound_name(name):
+        return name
+    
+    # Split on common separators
+    separators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/']
+    
+    name_upper = name.upper()
+    for separator in separators:
+        if separator in name_upper:
+            # Take only the first entity (primary company)
+            parts = name.split(separator)
+            if parts:
+                primary = parts[0].strip()
+                # Remove trailing "LTD", "LIMITED" etc from the primary entity for cleaner matching
+                return primary
+    
+    return name
+
+
 def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     """
     Build clusters of similar names using fuzzy matching.
     
     This groups records where names are similar (e.g., "ABC Ltd", "ABC Limited", "ABC (Mauritius) Ltd")
     into a single cluster, allowing partial matching across name variations.
+    
+    COMPOUND NAME HANDLING:
+    - Detects compound names with "&/OR" patterns
+    - Extracts only the PRIMARY entity (first company) for clustering
+    - Prevents over-clustering of unrelated companies
     
     Args:
         df: DataFrame to cluster
@@ -504,18 +569,29 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
         logger.info("No records to cluster")
         return {}
     
-    # Extract and normalize names
+    # Extract and normalize names - WITH COMPOUND NAME DETECTION
     names_with_indices = []
+    compound_count = 0
+    
     for idx, row in df.iterrows():
         name = str(row.get(name_column, '')).upper().strip()
         if name and name != 'NAN':
-            names_with_indices.append((idx, name))
+            # Extract primary entity from compound names to prevent over-clustering
+            if _is_compound_name(name):
+                primary_entity = _extract_primary_entity(name)
+                compound_count += 1
+                logger.debug(f"Compound name detected at {idx}: '{name[:80]}...' -> Primary: '{primary_entity}'")
+                names_with_indices.append((idx, primary_entity))
+            else:
+                names_with_indices.append((idx, name))
     
     if not names_with_indices:
         logger.info("No valid names found for clustering")
         return {}
     
     logger.info(f"Found {len(names_with_indices)} valid names to cluster")
+    if compound_count > 0:
+        logger.info(f"  ⚠️ Detected {compound_count} compound names - extracted primary entities to prevent over-clustering")
     
     # Union-Find data structure for clustering
     parent = {idx: idx for idx, _ in names_with_indices}
@@ -549,10 +625,29 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
             # This prevents over-clustering of companies with financial relationships
             similarity = matcher.calculate_intelligent_similarity(name1, name2)
             
-            # Union if similarity meets threshold
+            # Stricter clustering to prevent false positives based on common words
             if similarity >= fuzzy_threshold:
-                union(idx1, idx2)
-                unions_performed += 1
+                # Additional validation: check core name similarity (without common suffixes)
+                name1_core = name1.replace('LTD', '').replace('LIMITED', '').replace('INC', '').replace('COMPANY', '').replace('CORPORATION', '').strip()
+                name2_core = name2.replace('LTD', '').replace('LIMITED', '').replace('INC', '').replace('COMPANY', '').replace('CORPORATION', '').strip()
+                
+                # Require minimum meaningful length after cleaning
+                if len(name1_core) < 3 or len(name2_core) < 3:
+                    # Names too short after removing suffixes - skip
+                    continue
+                
+                # Calculate core similarity (without common words)
+                core_similarity = fuzz.token_set_ratio(name1_core, name2_core)
+                
+                # Require BOTH overall similarity AND core similarity to prevent false positives
+                # Relaxed threshold to allow more legitimate matches while still preventing common-word-only matches
+                if core_similarity >= (fuzzy_threshold - 5):  # More lenient core threshold (75% for 90% overall)
+                    union(idx1, idx2)
+                    unions_performed += 1
+                else:
+                    # Log rejected clustering for debugging
+                    if similarity >= 95:  # Only log high-similarity rejections
+                        logger.debug(f"Rejected clustering despite {similarity}% similarity: '{name1[:40]}' vs '{name2[:40]}' (core similarity: {core_similarity}%)")
     
     logger.info(f"Performed {comparisons} comparisons, created {unions_performed} unions")
     
@@ -1253,6 +1348,11 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
     """
     logger.info("\n=== Merging Groups with Overlapping Insurer Indices ===")
     
+    # Check if group_id column exists (only created when cluster matches are found)
+    if 'group_id' not in cbl_df.columns:
+        logger.info("No group_id column found - no groups to merge (no cluster matches found)")
+        return cbl_df
+    
     # Get all records that have group_id and matched_insurer_indices
     grouped_records = cbl_df[
         (cbl_df['group_id'].notna()) & 
@@ -1381,11 +1481,6 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
     exact_matches = 0
     partial_matches = 0
     
-    # Initialize group_id column if it doesn't exist
-    if 'group_id' not in cbl_df.columns:
-        cbl_df['group_id'] = None
-        logger.info("Initialized group_id column")
-    
     logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
     logger.info(f"Name Clustering Threshold: {fuzzy_threshold}%")
 
@@ -1415,7 +1510,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
     
     insurer_name_clusters = _build_fuzzy_name_clusters(
         available_insurer,
-        name_column='ClientName_INSURER', 
+        name_column='ClientName_INSURER',  # Use original column, not cleaned
         fuzzy_threshold=fuzzy_threshold,
         prefix="INSURER"
     )
@@ -1426,12 +1521,17 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
     logger.info("\n=== Matching Clusters ===")
     group_counter = 0
     
+    # Use CompanyNameMatcher for cross-cluster matching to handle compound names
+    matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
+    
     for cbl_cluster_name, cbl_indices in cbl_name_clusters.items():
         for insurer_cluster_name, insurer_indices in insurer_name_clusters.items():
-            # Check if cluster names are similar
-            cluster_similarity = fuzz.token_set_ratio(cbl_cluster_name, insurer_cluster_name)
+            # Use intelligent similarity calculation for cross-cluster matching
+            cluster_similarity = matcher.calculate_intelligent_similarity(cbl_cluster_name, insurer_cluster_name)
             
-            if cluster_similarity >= fuzzy_threshold:
+            # Use stricter threshold for cluster matching (90% vs 95% for within-cluster)
+            # This ensures only very similar clusters are matched together
+            if cluster_similarity >= 90:
                 group_counter += 1
                 group_id = f"NAME_GROUP_{group_counter}"
                 
@@ -1446,9 +1546,9 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
                 
                 logger.info(f"\n🎯 Cluster Match Found:")
                 logger.info(f"  Group ID: {group_id}")
-                logger.info(f"  CBL Cluster: '{cbl_cluster_name}' ({len(cbl_indices)} records)")
-                logger.info(f"  Insurer Cluster: '{insurer_cluster_name}' ({len(insurer_indices)} records)")
-                logger.info(f"  Name Similarity: {cluster_similarity}%")
+                logger.info(f"  CBL Cluster: '{cbl_cluster_name[:60]}...' ({len(cbl_indices)} records)")
+                logger.info(f"  Insurer Cluster: '{insurer_cluster_name[:60]}...' ({len(insurer_indices)} records)")
+                logger.info(f"  Cluster Name Similarity: {cluster_similarity}% (threshold: 90%)")
                 logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
                 logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
                 logger.info(f"  Difference: Rs{difference:.2f}")
