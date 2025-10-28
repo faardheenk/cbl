@@ -569,21 +569,31 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
         logger.info("No records to cluster")
         return {}
     
-    # Extract and normalize names - WITH COMPOUND NAME DETECTION
+    # Extract and normalize names - WITH COMPOUND NAME AND FINANCIAL RELATIONSHIP DETECTION
     names_with_indices = []
     compound_count = 0
+    financial_relationship_count = 0
+    
+    # Use CompanyNameMatcher for consistent primary company extraction
+    temp_matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
     
     for idx, row in df.iterrows():
         name = str(row.get(name_column, '')).upper().strip()
         if name and name != 'NAN':
-            # Extract primary entity from compound names to prevent over-clustering
-            if _is_compound_name(name):
-                primary_entity = _extract_primary_entity(name)
+            # Extract primary company using the same logic as similarity calculation
+            # This handles both compound names (&/OR) AND financial relationships (ON LEASE TO)
+            primary_entity, rel_type = temp_matcher.extract_primary_company(name)
+            
+            # Track extraction statistics
+            if rel_type == "compound":
                 compound_count += 1
                 logger.debug(f"Compound name detected at {idx}: '{name[:80]}...' -> Primary: '{primary_entity}'")
-                names_with_indices.append((idx, primary_entity))
-            else:
-                names_with_indices.append((idx, name))
+            elif rel_type != "direct":
+                financial_relationship_count += 1
+                logger.debug(f"Financial relationship detected at {idx}: '{name[:80]}...' -> Primary: '{primary_entity}'")
+            
+            # Always use the primary entity for clustering (not the full name)
+            names_with_indices.append((idx, primary_entity))
     
     if not names_with_indices:
         logger.info("No valid names found for clustering")
@@ -592,6 +602,8 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     logger.info(f"Found {len(names_with_indices)} valid names to cluster")
     if compound_count > 0:
         logger.info(f"  ⚠️ Detected {compound_count} compound names - extracted primary entities to prevent over-clustering")
+    if financial_relationship_count > 0:
+        logger.info(f"  ⚠️ Detected {financial_relationship_count} financial relationships - extracted primary entities to prevent over-clustering")
     
     # Union-Find data structure for clustering
     parent = {idx: idx for idx, _ in names_with_indices}
@@ -632,7 +644,7 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
                 name2_core = name2.replace('LTD', '').replace('LIMITED', '').replace('INC', '').replace('COMPANY', '').replace('CORPORATION', '').strip()
                 
                 # Require minimum meaningful length after cleaning
-                if len(name1_core) < 3 or len(name2_core) < 3:
+                if len(name1_core) < 2 or len(name2_core) < 2:
                     # Names too short after removing suffixes - skip
                     continue
                 
