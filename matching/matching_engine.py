@@ -541,6 +541,65 @@ def _extract_primary_entity(name):
     return name
 
 
+def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
+    """
+    Check if two names have sufficient meaningful word overlap to be clustered.
+    
+    This prevents over-clustering based on a single common word (e.g., "SUN LTD" vs "WOLMAR SUN HOTELS LTD").
+    
+    Args:
+        name1: First company name
+        name2: Second company name
+        min_common_words: Minimum number of meaningful common words required
+        
+    Returns:
+        tuple: (has_sufficient_overlap, common_words_count, common_words)
+    """
+    # Common business suffixes and words to exclude from meaningful word matching
+    EXCLUDE_WORDS = {
+        # Legal entity suffixes
+        'LTD', 'LIMITED', 'INC', 'INCORPORATED', 'COMPANY', 'CO', 'CORP', 'CORPORATION',
+        'LLC', 'PLC', 'SA', 'AG', 'GMBH', 'NV', 'BV', 'SPA', 'SRL', 'LTDA',
+        # Common words
+        'THE', 'AND', 'OR', 'OF', 'IN', 'AT', 'TO', 'FOR', 'WITH', 'ON',
+        # Geographic and organizational descriptors
+        'MAURITIUS', 'HOLDINGS', 'GROUP', 'INTERNATIONAL', 'GLOBAL',
+        # Generic business activity descriptors (to prevent false clustering)
+        'SERVICES', 'SERVICE', 'MANAGEMENT', 'CONSULTING', 'TRADING', 'CORPORATE',
+        'FUND', 'FUNDS', 'INVESTMENT', 'INVESTMENTS', 'FINANCE', 'FINANCIAL',
+        'BUSINESS', 'ENTERPRISES', 'SOLUTIONS', 'TRUST', 'TRUSTEES',
+        'ADVISORS', 'ADVISORY', 'CAPITAL', 'PARTNERS', 'ASSOCIATES'
+    }
+    
+    # Extract words from both names (remove parentheses and their content first)
+    name1_cleaned = re.sub(r'\([^)]*\)', '', name1.upper()).strip()
+    name2_cleaned = re.sub(r'\([^)]*\)', '', name2.upper()).strip()
+    
+    # Remove punctuation and split into words
+    name1_cleaned = re.sub(r'[^\w\s]', ' ', name1_cleaned)  # Replace punctuation with spaces
+    name2_cleaned = re.sub(r'[^\w\s]', ' ', name2_cleaned)
+    
+    # Split and filter out empty strings and excluded words
+    words1 = set(w for w in name1_cleaned.split() if w) - EXCLUDE_WORDS
+    words2 = set(w for w in name2_cleaned.split() if w) - EXCLUDE_WORDS
+    
+    # Find common meaningful words
+    common_words = words1 & words2
+    
+    # Special case: If BOTH names are very short (1-2 words after filtering), allow single word match
+    # This handles cases like "ACME LTD" vs "ACME HOLDINGS LTD"
+    # But if only ONE name is short and the other is long, require 2 common words to prevent false positives
+    if len(words1) <= 2 and len(words2) <= 2:
+        min_required = 1
+    else:
+        # At least one name is longer than 2 words - require full min_common_words
+        min_required = min_common_words
+    
+    has_sufficient = len(common_words) >= min_required
+    
+    return has_sufficient, len(common_words), common_words
+
+
 def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     """
     Build clusters of similar names using fuzzy matching.
@@ -552,6 +611,11 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     - Detects compound names with "&/OR" patterns
     - Extracts only the PRIMARY entity (first company) for clustering
     - Prevents over-clustering of unrelated companies
+    
+    WORD OVERLAP VALIDATION:
+    - Requires at least 2 meaningful words to match (not just common suffixes)
+    - Prevents clustering of unrelated companies that share only one common word
+    - Example: "SUN LTD" and "WOLMAR SUN HOTELS LTD" won't cluster (only "SUN" is common)
     
     Args:
         df: DataFrame to cluster
@@ -624,6 +688,7 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
     # Compare all pairs of names and union similar ones
     comparisons = 0
     unions_performed = 0
+    word_overlap_rejections = 0
     
     # VITIRO LTD FIX: Use intelligent company name matcher
     # Create matcher ONCE to leverage caching across all comparisons
@@ -639,6 +704,16 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
             
             # Stricter clustering to prevent false positives based on common words
             if similarity >= fuzzy_threshold:
+                # NEW VALIDATION: Check for sufficient meaningful word overlap
+                # This prevents clustering of unrelated companies that share only one common word
+                # Example: "SUN LTD" and "WOLMAR SUN HOTELS LTD" won't cluster (only "SUN" is common)
+                has_overlap, common_count, common_words = _has_sufficient_word_overlap(name1, name2, min_common_words=2)
+                
+                if not has_overlap:
+                    word_overlap_rejections += 1
+                    logger.debug(f"Rejected clustering due to insufficient word overlap: '{name1[:50]}' vs '{name2[:50]}' (only {common_count} common words: {common_words})")
+                    continue
+                
                 # Additional validation: check core name similarity (without common suffixes)
                 name1_core = name1.replace('LTD', '').replace('LIMITED', '').replace('INC', '').replace('COMPANY', '').replace('CORPORATION', '').strip()
                 name2_core = name2.replace('LTD', '').replace('LIMITED', '').replace('INC', '').replace('COMPANY', '').replace('CORPORATION', '').strip()
@@ -656,12 +731,15 @@ def _build_fuzzy_name_clusters(df, name_column, fuzzy_threshold=90, prefix=""):
                 if core_similarity >= (fuzzy_threshold - 5):  # More lenient core threshold (75% for 90% overall)
                     union(idx1, idx2)
                     unions_performed += 1
+                    logger.debug(f"Clustered: '{name1[:50]}' + '{name2[:50]}' (similarity: {similarity}%, common words: {common_words})")
                 else:
                     # Log rejected clustering for debugging
                     if similarity >= 95:  # Only log high-similarity rejections
                         logger.debug(f"Rejected clustering despite {similarity}% similarity: '{name1[:40]}' vs '{name2[:40]}' (core similarity: {core_similarity}%)")
     
     logger.info(f"Performed {comparisons} comparisons, created {unions_performed} unions")
+    if word_overlap_rejections > 0:
+        logger.info(f"  ℹ️ Rejected {word_overlap_rejections} potential clusters due to insufficient word overlap (prevents over-clustering on single common words)")
     
     # Group indices by their root parent (cluster representative)
     clusters_by_root = {}
@@ -1544,6 +1622,17 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=
             # Use stricter threshold for cluster matching (90% vs 95% for within-cluster)
             # This ensures only very similar clusters are matched together
             if cluster_similarity >= 90:
+                # ADDITIONAL VALIDATION: Check word overlap to prevent false positive cross-cluster matches
+                # This prevents matching unrelated companies that share only one common word
+                has_overlap, common_count, common_words = _has_sufficient_word_overlap(
+                    cbl_cluster_name, insurer_cluster_name, min_common_words=2
+                )
+                
+                if not has_overlap:
+                    logger.debug(f"Rejected cross-cluster match despite {cluster_similarity}% similarity: "
+                               f"'{cbl_cluster_name[:50]}' vs '{insurer_cluster_name[:50]}' "
+                               f"(only {common_count} common words: {common_words})")
+                    continue
                 group_counter += 1
                 group_id = f"NAME_GROUP_{group_counter}"
                 

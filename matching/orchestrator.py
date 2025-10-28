@@ -205,42 +205,16 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     logger.info(f"  - Sum of all categories: {exact_match_insurer_count + partial_match_insurer_count + unmatched_insurer_count}")
 
     # Split clean_cbls by individual match_status
-    # group_id is preserved for tracking but doesn't affect sheet assignment
-    # Each record goes to the sheet matching its individual match_status
+    logger.info("\n=== Splitting CBL records by match status ===")
     
-    logger.info("\n=== Splitting CBL records by individual match status (preserving group_id for reference) ===")
-    
-    # Simple approach: Split by match_status regardless of grouping
-    # The group_id column will be preserved in the output for reference
     exact_matches = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy()
     partial_matches = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
     no_matches = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
     
-    logger.info(f"✓ Split complete by individual match_status:")
+    logger.info(f"✓ Split complete:")
     logger.info(f"  - Exact matches: {len(exact_matches)}")
     logger.info(f"  - Partial matches: {len(partial_matches)}")
     logger.info(f"  - No matches: {len(no_matches)}")
-    
-    # Log grouping statistics if groups exist
-    if 'group_id' in clean_cbl.columns and clean_cbl['group_id'].notna().any():
-        grouped_records = clean_cbl[clean_cbl['group_id'].notna()]
-        num_groups = grouped_records['group_id'].nunique()
-        logger.info(f"  - Records with group_id: {len(grouped_records)} across {num_groups} groups")
-        logger.info(f"    (group_id preserved in output for reference)")
-        
-        # Log mixed groups (groups with multiple match statuses)
-        for group_id in grouped_records['group_id'].unique():
-            if pd.isna(group_id):
-                continue
-            group_indices = grouped_records[grouped_records['group_id'] == group_id].index
-            group_statuses = clean_cbl.loc[group_indices, 'match_status'].unique()
-            if len(group_statuses) > 1:
-                logger.info(f"    Mixed status group {group_id}: {list(group_statuses)}")
-    
-    # Store indices for later use in creating CBL-only sheets
-    exact_match_indices = set(exact_matches.index) if not exact_matches.empty else set()
-    partial_match_indices = set(partial_matches.index) if not partial_matches.empty else set()
-    no_match_indices = set(no_matches.index) if not no_matches.empty else set()
 
     # Explode matched_insurer_indices and merge with insurer
     exact_matches = explode_and_merge(exact_matches, clean_insurer)
@@ -353,52 +327,12 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     if 'should_be_no_match' in locals() and not should_be_no_match.empty:
         for idx in should_be_no_match.index:
             clean_cbl.at[idx, "match_status"] = "No Match"
-    
-    # Create separate CBL sheets (without insurer data merged)
-    # Use the indices from the match_status splitting
-    logger.info("Creating CBL-only sheets by match_status")
-    exact_matches_cbl_only = clean_cbl.loc[list(exact_match_indices)].copy() if exact_match_indices else pd.DataFrame()
-    partial_matches_cbl_only = clean_cbl.loc[list(partial_match_indices)].copy() if partial_match_indices else pd.DataFrame()
-    no_matches_cbl_only = clean_cbl.loc[list(no_match_indices)].copy() if no_match_indices else pd.DataFrame()
 
-    # Create separate insurer sheets with bounds checking
-    try:
-        exact_match_insurer_only = clean_insurer.iloc[list(exact_match_insurer_indices)].copy()
-    except Exception as e:
-        logger.error(f"Error accessing exact match insurer indices: {str(e)}")
-        exact_match_insurer_only = pd.DataFrame()
-    
-    try:
-        partial_match_insurer_only = clean_insurer.iloc[list(partial_match_insurer_indices)].copy()
-    except Exception as e:
-        logger.error(f"Error accessing partial match insurer indices: {str(e)}")
-        partial_match_insurer_only = pd.DataFrame()
-    
-    try:
-        # Use the current unmatched indices instead of the original ones
-        if 'current_unmatched_indices' in locals() and current_unmatched_indices:
-            not_found_insurer_only = clean_insurer.loc[list(current_unmatched_indices)].copy()
-        else:
-            not_found_insurer_only = pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error accessing unmatched insurer indices: {str(e)}")
-        not_found_insurer_only = pd.DataFrame()
-
-    # Write to Excel in memory with 6 separate sheets
+    # Write to Excel in memory with combined sheets only
     try: 
         output_buffer = io.BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            # CBL sheets (CBL data only)
-            exact_matches_cbl_only.to_excel(writer, sheet_name="exact match cbl", index=False)
-            partial_matches_cbl_only.to_excel(writer, sheet_name="partial match cbl", index=False)
-            no_matches_cbl_only.to_excel(writer, sheet_name="not found cbl", index=False)
-            
-            # Insurer sheets (insurer data only)
-            exact_match_insurer_only.to_excel(writer, sheet_name="exact match insurer", index=False)
-            partial_match_insurer_only.to_excel(writer, sheet_name="partial match insurer", index=False)
-            not_found_insurer_only.to_excel(writer, sheet_name="not found insurer", index=False)
-            
-            # Original combined sheets (for reference)
+            # Combined sheets: CBL + Insurer data merged
             exact_matches.to_excel(writer, sheet_name="Exact Matches", index=False)
             partial_matches.to_excel(writer, sheet_name="Partial Matches", index=False)
             no_matches.to_excel(writer, sheet_name="No Matches CBL", index=False)
@@ -434,15 +368,15 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     cbl_partial_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'Partial Match']['ProcessedAmount'], errors='coerce').sum()
     cbl_no_match_amount = pd.to_numeric(clean_cbl[clean_cbl['match_status'] == 'No Match']['ProcessedAmount'], errors='coerce').sum()
     
-    # Calculate insurer amounts (ensure numeric conversion) with bounds checking
+    # Calculate insurer amounts (ensure numeric conversion)
     try:
-        exact_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(exact_match_insurer_indices)]['ProcessedAmount_INSURER'], errors='coerce').sum()
+        exact_match_insurer_amount = pd.to_numeric(clean_insurer.loc[list(exact_match_insurer_indices), 'ProcessedAmount_INSURER'], errors='coerce').sum()
     except Exception as e:
         logger.error(f"Error calculating exact match insurer amount: {str(e)}")
         exact_match_insurer_amount = 0
     
     try:
-        partial_match_insurer_amount = pd.to_numeric(clean_insurer.iloc[list(partial_match_insurer_indices)]['ProcessedAmount_INSURER'], errors='coerce').sum()
+        partial_match_insurer_amount = pd.to_numeric(clean_insurer.loc[list(partial_match_insurer_indices), 'ProcessedAmount_INSURER'], errors='coerce').sum()
     except Exception as e:
         logger.error(f"Error calculating partial match insurer amount: {str(e)}")
         partial_match_insurer_amount = 0
