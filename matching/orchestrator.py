@@ -5,7 +5,7 @@ import logging
 import os
 from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
-from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
+from .matching_engine import pass1, pass2, pass3, pass4, GlobalMatchTracker
 from .output_handler import explode_and_merge
 import io
 
@@ -135,6 +135,17 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
                 clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
                 logger.info("⚠ Pass 3: Required keys (ClientName, ProcessedAmount) not found in mappings - skipping Pass 3")
+            
+            # Log global tracker status after Pass 3
+            if global_tracker:
+                logger.info(f"📊 After Pass 3: {global_tracker.get_usage_summary()}")
+            
+            # Pass 4: Corporate Group Matching (requires only ClientName)
+            if has_required_keys(['ClientName'], ['ClientName']):
+                logger.info("✓ Pass 4: Required keys found in mappings - running Pass 4 Corporate Group Matching")
+                clean_cbl = pass4(clean_cbl, clean_insurer, tolerance, global_tracker)
+            else:
+                logger.info("⚠ Pass 4: Required keys (ClientName) not found in mappings - skipping Pass 4")
             
             # Log final global tracker status
             if global_tracker:
@@ -327,6 +338,16 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     if 'should_be_no_match' in locals() and not should_be_no_match.empty:
         for idx in should_be_no_match.index:
             clean_cbl.at[idx, "match_status"] = "No Match"
+    
+    # Sort No Match records by client name for easier review
+    logger.info("\n=== Sorting No Match records by client name ===")
+    if not no_matches.empty and 'ClientName' in no_matches.columns:
+        no_matches = no_matches.sort_values('ClientName', ascending=True).reset_index(drop=True)
+        logger.info(f"✓ Sorted {len(no_matches)} No Match CBL records by ClientName")
+    
+    if not unmatched_insurer.empty and 'ClientName_INSURER' in unmatched_insurer.columns:
+        unmatched_insurer = unmatched_insurer.sort_values('ClientName_INSURER', ascending=True).reset_index(drop=True)
+        logger.info(f"✓ Sorted {len(unmatched_insurer)} No Match Insurer records by ClientName_INSURER")
 
     # Write to Excel in memory with combined sheets only
     try: 

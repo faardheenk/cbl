@@ -545,12 +545,19 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     """
     Check if two names have sufficient meaningful word overlap to be clustered.
     
-    This prevents over-clustering based on a single common word (e.g., "SUN LTD" vs "WOLMAR SUN HOTELS LTD").
+    This prevents over-clustering based on:
+    - Single common word: "SUN LTD" vs "WOLMAR SUN HOTELS LTD" → NO MATCH
+    - Proper subset: "SUN LTD" vs "SUN MARINE LTD" → NO MATCH
+    - Partial overlap: "SUN RESORTS" vs "SUN HOTELS" → NO MATCH (only 50% overlap)
+    
+    Allows matching when:
+    - High overlap: "ACME LTD" vs "ACME HOLDINGS LTD" → MATCH (100% overlap)
+    - Multiple common words: "ABC XYZ LTD" vs "ABC XYZ HOLDINGS" → MATCH
     
     Args:
         name1: First company name
         name2: Second company name
-        min_common_words: Minimum number of meaningful common words required
+        min_common_words: Minimum number of meaningful common words required (default: 2)
         
     Returns:
         tuple: (has_sufficient_overlap, common_words_count, common_words)
@@ -586,16 +593,34 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     # Find common meaningful words
     common_words = words1 & words2
     
-    # Special case: If BOTH names are very short (1-2 words after filtering), allow single word match
-    # This handles cases like "ACME LTD" vs "ACME HOLDINGS LTD"
-    # But if only ONE name is short and the other is long, require 2 common words to prevent false positives
-    if len(words1) <= 2 and len(words2) <= 2:
-        min_required = 1
+    # Check if one name is a proper subset of the other
+    # e.g., "SUN" (subset) vs "SUN MARINE" (superset)
+    is_subset = (words1 < words2) or (words2 < words1)  # Proper subset (not equal)
+    
+    # Special case handling:
+    # 1. If one name is a proper subset of the other, they should NOT match
+    #    Example: "SUN LTD" should NOT match "SUN MARINE LTD"
+    # 2. If BOTH names are identical after filtering, they should match
+    # 3. If BOTH names are very short (1-2 words) AND equal, allow match
+    
+    if is_subset:
+        # One name is a proper subset - require ALL words to match (subset case should fail)
+        # This prevents "SUN" from matching "SUN MARINE"
+        has_sufficient = (len(words1) == len(words2)) and (len(common_words) >= min_common_words)
+    elif len(words1) <= 2 and len(words2) <= 2:
+        # Both short AND not a subset relationship
+        # Require that common words represent majority of BOTH names
+        # Example: "SUN RESORTS" vs "SUN HOTELS" → both have "SUN", but only 50% overlap → fail
+        # Example: "ACME LTD" vs "ACME HOLDINGS" → both have "ACME" (100% of first) → pass
+        overlap_pct_1 = len(common_words) / len(words1) if len(words1) > 0 else 0
+        overlap_pct_2 = len(common_words) / len(words2) if len(words2) > 0 else 0
+        
+        # Require at least 80% overlap in BOTH names
+        has_sufficient = (overlap_pct_1 >= 0.8) and (overlap_pct_2 >= 0.8)
     else:
         # At least one name is longer than 2 words - require full min_common_words
         min_required = min_common_words
-    
-    has_sufficient = len(common_words) >= min_required
+        has_sufficient = len(common_words) >= min_required
     
     return has_sufficient, len(common_words), common_words
 
@@ -1560,6 +1585,408 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
             logger.info(f"  ✓ Updated CBL {cbl_idx}: {match_type} match with {len(insurer_indices)} insurer records (cluster-level decision)")
     
     logger.info(f"\n✓ Group merging complete: {len(groups_to_merge)} groups merged into {merged_group_counter} merged groups")
+    return cbl_df
+
+
+def _extract_corporate_root(name, max_words=2):
+    """
+    Extract the distinctive corporate root identifier with intelligent detection for:
+    1. Parent company indicators (GROUP, HOLDINGS, etc.)
+    2. Person names (MR, MRS, MS, DR, etc.)
+    
+    This function intelligently handles both corporate entities and individual persons
+    to ensure accurate grouping without false positives.
+    
+    Smart Logic:
+        - If starts with person title (MR, MRS, MS, DR, etc.):
+          → Extract 3-4 name words (skip title) for unique identification
+        - If second word is a parent company indicator (GROUP, HOLDINGS, etc.):
+          → Use only first word to match subsidiaries
+        - Otherwise: Use 2 words for precision
+    
+    Examples:
+        # Person names (use 3-4 words, skip titles):
+        "MRS MARIE BERTHE CHANTAL HARDY" → "MARIE BERTHE CHANTAL" (3 words)
+        "MRS MARIE DESIRE CATHERINE BOYER" → "MARIE DESIRE CATHERINE" (3 words)
+        "MR JOHN PAUL SMITH" → "JOHN PAUL SMITH" (3 words)
+        → Result: Different people stay separate ✓
+        
+        # Parent company indicators (use 1 word):
+        "ALTEO GROUP OF COMPANIES" → "ALTEO" (GROUP is parent indicator)
+        "AXYS HOLDINGS LTD" → "AXYS" (HOLDINGS is parent indicator)
+        "CIEL CORPORATE LTD" → "CIEL" (CORPORATE is parent indicator)
+        
+        # Specific subsidiaries (use 2 words):
+        "ALTEO AGRI LIMITED" → "ALTEO AGRI"
+        "ALTEO MILLING LTD" → "ALTEO MILLING"
+        "ALTEO REFINERY LTD" → "ALTEO REFINERY"
+        
+        # Different companies with same prefix (use 2 words):
+        "CITY AND BEACH HOTELS LTD" → "CITY BEACH"
+        "CITY SPORT LIMITEE" → "CITY SPORT"
+        "CITY BROKERS LTD" → "CITY BROKERS"
+    
+    Args:
+        name: Company name string or person name
+        max_words: Maximum number of distinctive words to extract (default: 2, but 3-4 for persons)
+        
+    Returns:
+        str: Corporate root or person identifier (intelligently 1-4 words) or None if not found
+    """
+    if not name or pd.isna(name):
+        return None
+    
+    # Person name titles - if name starts with these, treat as person (not company)
+    PERSON_TITLES = {
+        'MR', 'MRS', 'MS', 'MISS', 'DR', 'PROF', 'SIR', 'LADY', 'LORD',
+        'MR.', 'MRS.', 'MS.', 'DR.', 'PROF.',
+        'MONSIEUR', 'MADAME', 'MADEMOISELLE', 'MLLE', 'MME'
+    }
+    
+    # Parent company indicators - if these appear as the second distinctive word,
+    # use only the first word to enable subsidiary-parent matching
+    PARENT_INDICATORS = {
+        'GROUP', 'GROUPS', 'HOLDINGS', 'HOLDING', 'CORPORATE', 
+        'COMPANIES', 'ENTERPRISES', 'INTERNATIONAL', 'GLOBAL'
+    }
+    
+    # Common prefixes to skip (articles, etc.)
+    COMMON_PREFIXES = {'THE', 'LE', 'LA', 'LES', 'DES', 'DU'}
+    
+    # Legal entity suffixes and common words to exclude (NOT for person names)
+    EXCLUSIONS = {
+        'LIMITED', 'LTD', 'INC', 'INCORPORATED', 'COMPANY', 'CO', 'CORP', 'CORPORATION',
+        'LLC', 'PLC', 'SA', 'AG', 'GMBH', 'NV', 'BV', 'SPA', 'SRL', 'LTDA',
+        'LIMITEE', 'LIMITADA', 'SOCIETE', 'LTEE',
+        'AND', 'OR', 'OF', 'IN', 'AT', 'TO', 'FOR', 'WITH', 'ON'
+    }
+    
+    # Clean and tokenize
+    name_upper = str(name).upper().strip()
+    
+    # Remove parentheses and their content (e.g., "COMPANY (MAURITIUS) LTD" → "COMPANY LTD")
+    name_upper = re.sub(r'\([^)]*\)', '', name_upper).strip()
+    
+    # Extract the LESSEE (actual insured party) from financial relationship patterns
+    # "ABC BANKING LTD ON LEASE TO A & D TRANSPORT LTD" → "A & D TRANSPORT LTD" (the lessee)
+    # The lessee is the actual insured party, not the lessor/financer
+    financial_patterns = ['ON LEASE TO', 'ON FINANCE TO', 'ON FINANCIAL LEASE TO', 
+                          'ON FINANCE LEASE TO', 'ON (FINANCE) LEASE TO']
+    for pattern in financial_patterns:
+        if pattern in name_upper:
+            parts = name_upper.split(pattern)
+            if len(parts) >= 2 and parts[1].strip():
+                # Take the SECOND part (lessee/actual insured party)
+                name_upper = parts[1].strip()
+            else:
+                # No lessee specified, fall back to first part
+                name_upper = parts[0].strip()
+            break
+    
+    # Remove compound name parts (take first entity only)
+    # "ALTEO AGRI LTD &/OR ALTEO MILLING LTD" → "ALTEO AGRI LTD"
+    compound_separators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/']
+    for separator in compound_separators:
+        if separator in name_upper:
+            name_upper = name_upper.split(separator)[0].strip()
+            break
+    
+    # Replace punctuation with spaces and split
+    name_cleaned = re.sub(r'[^\w\s]', ' ', name_upper)
+    words = name_cleaned.split()
+    
+    # SMART PERSON NAME DETECTION
+    # Check if name starts with a person title
+    is_person_name = False
+    if words and words[0] in PERSON_TITLES:
+        is_person_name = True
+    
+    if is_person_name:
+        # PERSON NAME LOGIC: Extract 3-4 name words (skip title) for unique identification
+        # "MRS MARIE BERTHE CHANTAL HARDY" → skip "MRS" → take "MARIE BERTHE CHANTAL" (3 words)
+        person_words = []
+        for word in words[1:]:  # Skip first word (title)
+            # For person names, don't apply EXCLUSIONS (names can be "AND", "DE", etc.)
+            # Only skip very short words (< 2 chars) like initials without periods
+            if len(word) >= 2:
+                person_words.append(word)
+                if len(person_words) >= 3:  # Extract 3 words for person names
+                    break
+        
+        if person_words:
+            return ' '.join(person_words)
+        else:
+            return None
+    
+    # CORPORATE NAME LOGIC (non-person names)
+    # Extract up to max_words distinctive words (default: 2)
+    distinctive_words = []
+    for word in words:
+        if word not in COMMON_PREFIXES and word not in EXCLUSIONS:
+            if len(word) >= 3:  # Minimum length (reduced to 3 to catch more words)
+                distinctive_words.append(word)
+                if len(distinctive_words) >= max_words:
+                    break
+    
+    if not distinctive_words:
+        return None
+    
+    # SMART LOGIC: Check if second word is a parent company indicator
+    # If yes, use only first word to enable subsidiary-parent matching
+    if len(distinctive_words) >= 2:
+        if distinctive_words[1] in PARENT_INDICATORS:
+            # Second word is a parent indicator (GROUP, HOLDINGS, etc.)
+            # Use only first word so subsidiaries can match
+            return distinctive_words[0]
+    
+    # Otherwise, return all distinctive words for precision
+    return ' '.join(distinctive_words)
+
+
+def _build_corporate_root_index(df, name_column, prefix="", min_occurrence=2):
+    """
+    Build an index of corporate roots and their associated record indices.
+    
+    Groups records by their corporate root identifier, filtering out roots that
+    don't meet the minimum occurrence threshold (to avoid noise from unique names).
+    
+    Args:
+        df: DataFrame to index
+        name_column: Column name containing company names
+        prefix: Logging prefix (e.g., "CBL" or "INSURER")
+        min_occurrence: Minimum number of records required for a root to be included
+        
+    Returns:
+        dict: {corporate_root: [list of record indices]}
+    """
+    logger.info(f"\n=== Building Corporate Root Index for {prefix} ===")
+    
+    root_index = {}
+    no_root_count = 0
+    
+    for idx, row in df.iterrows():
+        name = row.get(name_column, '')
+        root = _extract_corporate_root(name)
+        
+        if root:
+            if root not in root_index:
+                root_index[root] = []
+            root_index[root].append(idx)
+        else:
+            no_root_count += 1
+    
+    logger.info(f"Extracted {len(root_index)} unique corporate roots from {len(df)} records")
+    if no_root_count > 0:
+        logger.info(f"  ⚠️ {no_root_count} records had no extractable corporate root")
+    
+    # Filter: Only keep roots with minimum occurrence
+    # This prevents noise from unique one-off company names
+    initial_count = len(root_index)
+    filtered_index = {
+        root: indices 
+        for root, indices in root_index.items() 
+        if len(indices) >= min_occurrence
+    }
+    
+    filtered_count = initial_count - len(filtered_index)
+    if filtered_count > 0:
+        logger.info(f"  ℹ️ Filtered out {filtered_count} roots with < {min_occurrence} occurrences")
+    
+    # Log top corporate roots for visibility
+    if filtered_index:
+        sorted_roots = sorted(filtered_index.items(), key=lambda x: len(x[1]), reverse=True)
+        logger.info(f"\n  Top Corporate Roots in {prefix}:")
+        for root, indices in sorted_roots[:10]:
+            logger.info(f"    - {root}: {len(indices)} records")
+        if len(sorted_roots) > 10:
+            logger.info(f"    ... and {len(sorted_roots) - 10} more roots")
+    
+    return filtered_index
+
+
+def pass4(cbl_df, insurer_df, tolerance=100, global_tracker=None):
+    """
+    Pass 4: Corporate Group Matching with Amount Validation.
+    
+    Business Rule: Group records from the same corporate family together,
+    then validate amounts to classify as Exact Match or Partial Match.
+    
+    This pass ONLY processes CBL records with status "No Match".
+    Main goal: Move records from "No Match" to "Partial Match" (or "Exact Match" if amounts align).
+    
+    Process:
+        1. Intelligent extraction of identifiers:
+           - Corporate names: Extract 1-2 distinctive words (smart parent detection)
+           - Person names: Extract 3 name words (skip titles like MR, MRS, DR)
+        2. Match CBL and insurer records with same identifier
+        3. Calculate cumulative amounts for the entire group
+        4. Classify based on amount difference:
+           - If within tolerance → Exact Match
+           - If beyond tolerance → Partial Match
+    
+    Examples with Smart Detection:
+        # Corporate: Parent company indicators
+        - "ALTEO AGRI LTD" → "ALTEO AGRI" (2 words)
+        - "ALTEO MILLING LTD" → "ALTEO MILLING" (2 words)
+        - "ALTEO GROUP OF COMPANIES" → "ALTEO" (1 word - GROUP is parent indicator)
+        → Result: All ALTEO subsidiaries match ALTEO GROUP ✓
+        
+        # Corporate: Different companies with same prefix
+        - "CITY BEACH HOTELS" → "CITY BEACH" (2 words)
+        - "CITY SPORT LTD" → "CITY SPORT" (2 words)
+        - "CITY BROKERS" → "CITY BROKERS" (2 words)
+        → Result: CITY companies stay separate ✓
+        
+        # Person names: Extract 3 name words (skip titles)
+        - "MRS MARIE BERTHE CHANTAL HARDY" → "MARIE BERTHE CHANTAL" (3 words)
+        - "MRS MARIE DESIRE CATHERINE BOYER" → "MARIE DESIRE CATHERINE" (3 words)
+        - "MRS MARIE ODETTE HARDY" → "MARIE ODETTE HARDY" (3 words)
+        → Result: Different people stay separate ✓
+    
+    This pass handles parent-subsidiary relationships and corporate group accounts
+    where the insurer may use aggregate names like "GROUP OF COMPANIES" or where
+    individual subsidiaries need to be matched to consolidated accounts.
+    
+    Args:
+        cbl_df: CBL DataFrame with match results from previous passes
+        insurer_df: Insurer DataFrame
+        tolerance: Amount tolerance for exact match classification (default: 100)
+        global_tracker: GlobalMatchTracker instance for consistent row usage tracking
+        
+    Returns:
+        cbl_df: Updated CBL DataFrame with corporate group matches
+    """
+    logger.info("\n=== Pass 4: Corporate Group Matching with Amount Validation ===")
+    logger.info("Business Rule: Group by corporate root name, then validate amounts")
+    logger.info(f"Amount Tolerance: Rs{tolerance} (within tolerance → Exact Match, beyond → Partial Match)")
+    
+    exact_matches = 0
+    partial_matches = 0
+    
+    logger.info(f"Pass 4 starting with global tracker: {global_tracker.get_usage_summary()}")
+    
+    # Get only "No Match" CBL records (not partial matches)
+    unmatched_cbl = cbl_df[cbl_df['match_status'] == 'No Match'].copy()
+    logger.info(f"Processing {len(unmatched_cbl)} CBL records with 'No Match' status")
+    
+    if unmatched_cbl.empty:
+        logger.info("No unmatched records to process")
+        return cbl_df
+    
+    # Use global tracker for consistent filtering
+    # Exclude exact and matrix matches but allow partial matches to be upgraded
+    already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
+    available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
+    logger.info(f"Pass 4: Using global tracker - excluding {len(already_matched_insurer)} exact/matrix used insurer rows")
+    logger.info(f"Pass 4: Available insurer rows for corporate group matching: {len(available_insurer)}")
+    
+    if available_insurer.empty:
+        logger.info("No available insurer records to match")
+        return cbl_df
+    
+    # Build corporate root indices
+    cbl_root_index = _build_corporate_root_index(unmatched_cbl, 'ClientName', 'CBL', min_occurrence=1)
+    insurer_root_index = _build_corporate_root_index(available_insurer, 'ClientName_INSURER', 'INSURER', min_occurrence=1)
+    
+    logger.info(f"\nFound {len(cbl_root_index)} CBL corporate groups")
+    logger.info(f"Found {len(insurer_root_index)} insurer corporate groups")
+    
+    if not cbl_root_index or not insurer_root_index:
+        logger.info("No corporate groups found for matching")
+        return cbl_df
+    
+    # Match corporate groups by root name
+    logger.info("\n=== Matching Corporate Groups ===")
+    group_counter = 0
+    
+    for root in cbl_root_index.keys():
+        if root in insurer_root_index:
+            group_counter += 1
+            group_id = f"CORPORATE_GROUP_{root}_{group_counter}"
+            
+            cbl_indices = cbl_root_index[root]
+            insurer_indices = insurer_root_index[root]
+            
+            # Calculate group totals for amount validation
+            cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+            insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+            difference = abs(cbl_total + insurer_total)
+            
+            # Classify match based on amount difference
+            match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
+            is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+            
+            logger.info(f"\n🏢 Corporate Group Match Found:")
+            logger.info(f"  Group ID: {group_id}")
+            logger.info(f"  Corporate Root: {root}")
+            logger.info(f"  CBL Records: {len(cbl_indices)}")
+            logger.info(f"  Insurer Records: {len(insurer_indices)}")
+            logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
+            logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
+            logger.info(f"  Group Difference: Rs{difference:.2f}")
+            logger.info(f"  Match Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+            
+            # Validate insurer indices are available based on match type
+            if is_exact_match:
+                can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
+            else:
+                # For partial matches, allow sharing
+                can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
+            
+            if not available_indices:
+                logger.warning(f"  ⚠ No available insurer indices - skipping corporate group")
+                continue
+            
+            if not can_use_all:
+                logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available insurer indices")
+                insurer_indices = available_indices
+                # Recalculate insurer total with available indices only
+                insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+                difference = abs(cbl_total + insurer_total)
+                # Reclassify match based on new totals
+                match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
+                is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+                logger.info(f"  Reclassified as: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence) after using available indices")
+            
+            # Apply matches to all CBL records in this corporate group
+            for cbl_idx in cbl_indices:
+                # Mark pass for tracking
+                add_pass(cbl_df, cbl_idx, 4)
+                
+                # Calculate amounts for this specific record (all records get same insurer pool)
+                total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
+                cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
+                
+                # Match reason with amount classification
+                match_reason = f"Corporate Group: {root} ({len(cbl_indices)} CBL records, {len(insurer_indices)} insurer records, Group Diff: Rs{difference:.2f}, {confidence} Confidence)"
+                
+                # Apply match based on amount validation
+                if is_exact_match:
+                    # Amounts match within tolerance - mark as Exact Match
+                    _apply_cluster_exact_match(
+                        cbl_df, cbl_idx, match_reason, insurer_indices,
+                        total_insurer_amount, 4, global_tracker,
+                        confidence_level=confidence,
+                        amount_difference=difference
+                    )
+                    exact_matches += 1
+                    logger.info(f"  ✓ CBL {cbl_idx}: EXACT MATCH with {len(insurer_indices)} insurer records (CBL: Rs{cbl_amount:.2f})")
+                else:
+                    # Amounts don't match - mark as Partial Match (main goal of Pass 4)
+                    partial_matches += _apply_partial_match(
+                        cbl_df, cbl_idx, match_reason, insurer_indices,
+                        total_insurer_amount, 4, global_tracker,
+                        confidence_level=confidence,
+                        amount_difference=difference
+                    )
+                    logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL MATCH with {len(insurer_indices)} insurer records (CBL: Rs{cbl_amount:.2f}, Diff: Rs{difference:.2f})")
+                
+                # Assign group metadata
+                cbl_df.at[cbl_idx, 'group_id'] = group_id
+                cbl_df.at[cbl_idx, 'corporate_root'] = root
+    
+    logger.info(f"\n✓ Pass 4 complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} corporate groups")
+    logger.info(f"   Main Goal Achieved: Moved {exact_matches + partial_matches} records from 'No Match' to matched status")
     return cbl_df
 
 
