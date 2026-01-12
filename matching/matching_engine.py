@@ -26,7 +26,9 @@ class CompanyNameMatcher:
     
     FINANCIAL_PATTERNS = [
         (r'(.+?)\s+ON\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'lease_to'),
+        (r'(.+?)\s+ONLEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'onlease_to'),  # No space variant
         (r'(.+?)\s+ON\s+FINANCE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_to'),
+        (r'(.+?)\s+ONFINANCE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'onfinance_to'),  # No space variant
         (r'(.+?)\s+ON\s+FINANCE\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_lease'),
         (r'(.+?)\s+ON\s+FINANCIAL\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'financial_lease'),
         (r'(.+?)\s+ON\s+\(FINANCE\)\s+LEASE\s+TO\s+(.+?)(?:\s*$|\s+&)', 'finance_lease_paren'),
@@ -59,7 +61,8 @@ class CompanyNameMatcher:
         
         # Quick check: if no financial keywords, skip regex entirely
         has_financial_keyword = any(keyword in name_upper for keyword in 
-                                   ['ON LEASE', 'ON FINANCE', 'FINANCE LEASE', 'FINANCIAL LEASE', 
+                                   ['ON LEASE', 'ONLEASE', 'ON FINANCE', 'ONFINANCE', 
+                                    'FINANCE LEASE', 'FINANCIAL LEASE', 
                                     '(FINANCE)', 'ON (FINANCE)'])
         
         if not has_financial_keyword:
@@ -549,6 +552,7 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     - Single common word: "SUN LTD" vs "WOLMAR SUN HOTELS LTD" → NO MATCH
     - Proper subset: "SUN LTD" vs "SUN MARINE LTD" → NO MATCH
     - Partial overlap: "SUN RESORTS" vs "SUN HOTELS" → NO MATCH (only 50% overlap)
+    - Different primary identifiers: "SHA TRAVEL TOURS" vs "TAJ TRAVEL TOURS" → NO MATCH
     
     Allows matching when:
     - High overlap: "ACME LTD" vs "ACME HOLDINGS LTD" → MATCH (100% overlap)
@@ -590,8 +594,23 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     words1 = set(w for w in name1_cleaned.split() if w) - EXCLUDE_WORDS
     words2 = set(w for w in name2_cleaned.split() if w) - EXCLUDE_WORDS
     
+    # Also keep ordered list to check first word (primary company identifier)
+    words1_list = [w for w in name1_cleaned.split() if w and w not in EXCLUDE_WORDS]
+    words2_list = [w for w in name2_cleaned.split() if w and w not in EXCLUDE_WORDS]
+    
     # Find common meaningful words
     common_words = words1 & words2
+    
+    # CRITICAL CHECK: First distinctive word (primary identifier) must match
+    # This prevents "SHA TRAVEL TOURS" from matching "TAJ TRAVEL TOURS"
+    # The first word is typically the actual company name/identifier
+    if words1_list and words2_list:
+        first_word_1 = words1_list[0]
+        first_word_2 = words2_list[0]
+        
+        # If first words are different and both are substantive (3+ chars), reject
+        if first_word_1 != first_word_2 and len(first_word_1) >= 3 and len(first_word_2) >= 3:
+            return False, len(common_words), common_words
     
     # Check if one name is a proper subset of the other
     # e.g., "SUN" (subset) vs "SUN MARINE" (superset)
@@ -1669,9 +1688,10 @@ def _extract_corporate_root(name, max_words=2):
     
     # Extract the LESSEE (actual insured party) from financial relationship patterns
     # "ABC BANKING LTD ON LEASE TO A & D TRANSPORT LTD" → "A & D TRANSPORT LTD" (the lessee)
+    # "MCB LEASING LIMITED ONLEASE TO ECOBAT LTD" → "ECOBAT LTD" (the lessee)
     # The lessee is the actual insured party, not the lessor/financer
-    financial_patterns = ['ON LEASE TO', 'ON FINANCE TO', 'ON FINANCIAL LEASE TO', 
-                          'ON FINANCE LEASE TO', 'ON (FINANCE) LEASE TO']
+    financial_patterns = ['ON LEASE TO', 'ONLEASE TO', 'ON FINANCE TO', 'ONFINANCE TO', 
+                          'ON FINANCIAL LEASE TO', 'ON FINANCE LEASE TO', 'ON (FINANCE) LEASE TO']
     for pattern in financial_patterns:
         if pattern in name_upper:
             parts = name_upper.split(pattern)
@@ -1685,10 +1705,45 @@ def _extract_corporate_root(name, max_words=2):
     
     # Remove compound name parts (take first entity only)
     # "ALTEO AGRI LTD &/OR ALTEO MILLING LTD" → "ALTEO AGRI LTD"
-    compound_separators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/']
+    # "MR JOHN SMITH AND MRS JANE SMITH" → "MR JOHN SMITH" (first person)
+    # "MR JOHN SMITH OR MRS JANE SMITH" → "MR JOHN SMITH" (first person)
+    compound_separators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/', ' AND ', ' OR ']
     for separator in compound_separators:
         if separator in name_upper:
             name_upper = name_upper.split(separator)[0].strip()
+            break
+    
+    # ORGANIZATIONAL PREFIX HANDLING: Skip common organizational prefixes to extract actual identifier
+    # These are multi-word legal/organizational prefixes where the actual identifier comes AFTER
+    # Examples:
+    #   "SYNDICAT DES COPROPRIETAIRES DE LES TERRASSES DU BARACHOIS" → Extract "LES TERRASSES DU BARACHOIS"
+    #   "LE SYNDICAT DES COPROPRIETAIRES DU CENTRE FINANCIER DU NORD" → Extract "CENTRE FINANCIER DU NORD"
+    ORGANIZATIONAL_PREFIXES = [
+        'LE SYNDICAT DES COPROPRIETAIRES',
+        'SYNDICAT DES COPROPRIETAIRES',
+        'LA SYNDICAT DES COPROPRIETAIRES',
+        'SYNDICATE OF CO OWNERS',
+        'THE SYNDICATE OF CO OWNERS',
+    ]
+    
+    # Check if name starts with any organizational prefix
+    for org_prefix in ORGANIZATIONAL_PREFIXES:
+        if name_upper.startswith(org_prefix):
+            # Extract everything AFTER the prefix
+            remaining = name_upper[len(org_prefix):].strip()
+            
+            # Check for connecting words (DE, DU, DE LA, DE L', etc.) and skip them
+            # "DE LES TERRASSES DU BARACHOIS" → "LES TERRASSES DU BARACHOIS"
+            # "DU CENTRE FINANCIER DU NORD" → "CENTRE FINANCIER DU NORD"
+            connecting_patterns = ['DE L\'', 'DE LA', 'DE LES', 'DES', 'DE', 'DU', 'OF THE', 'OF']
+            for connector in connecting_patterns:
+                if remaining.startswith(connector + ' '):
+                    remaining = remaining[len(connector):].strip()
+                    break
+            
+            if remaining:
+                name_upper = remaining
+                logger.debug(f"Organizational prefix detected: '{org_prefix}' → Extracted: '{name_upper}'")
             break
     
     # Replace punctuation with spaces and split
@@ -1804,25 +1859,39 @@ def _build_corporate_root_index(df, name_column, prefix="", min_occurrence=2):
     return filtered_index
 
 
-def pass4(cbl_df, insurer_df, tolerance=100, global_tracker=None):
+def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=85, global_tracker=None):
     """
-    Pass 4: Corporate Group Matching with Amount Validation.
+    Pass 3: Intelligent Name Matching with Corporate Root & Fuzzy Clustering.
     
-    Business Rule: Group records from the same corporate family together,
-    then validate amounts to classify as Exact Match or Partial Match.
+    UNIFIED APPROACH: Combines corporate root extraction with fuzzy clustering
+    for comprehensive name-based matching with amount validation.
     
-    This pass ONLY processes CBL records with status "No Match".
-    Main goal: Move records from "No Match" to "Partial Match" (or "Exact Match" if amounts align).
+    Business Rule: Group records by name similarity, then validate amounts to classify
+    as Exact Match or Partial Match.
     
-    Process:
-        1. Intelligent extraction of identifiers:
-           - Corporate names: Extract 1-2 distinctive words (smart parent detection)
-           - Person names: Extract 3 name words (skip titles like MR, MRS, DR)
-        2. Match CBL and insurer records with same identifier
-        3. Calculate cumulative amounts for the entire group
-        4. Classify based on amount difference:
-           - If within tolerance → Exact Match
-           - If beyond tolerance → Partial Match
+    This pass processes CBL records with status "No Match" or "Partial Match".
+    Main goal: Move records from "No Match" to matched status, or upgrade "Partial Match".
+    
+    Two-Phase Matching Strategy:
+        Phase 1 - Exact Corporate Root Matching (Fast & Precise):
+            1. Extract corporate roots using intelligent detection:
+               - Corporate names: 1-2 distinctive words (smart parent detection)
+               - Person names: 3 name words (skip titles like MR, MRS, DR)
+               - Financial relationships: Extract lessee (ONLEASE TO, ON LEASE TO)
+               - Organizational prefixes: Skip prefixes to extract property/building name
+            2. Match CBL and insurer records with identical roots
+            3. Group by exact root match
+        
+        Phase 2 - Fuzzy Clustering Fallback (Catches Variations & Typos):
+            1. For remaining unmatched records, build fuzzy name clusters (similarity >= threshold)
+            2. Match clusters across CBL and insurer using intelligent similarity
+            3. Validate with first-word matching to prevent false positives
+        
+        Phase 3 - Amount Validation & Classification:
+            1. Calculate cumulative amounts for each group
+            2. Classify based on amount difference:
+               - Within tolerance → Exact Match
+               - Beyond tolerance → Partial Match
     
     Examples with Smart Detection:
         # Corporate: Parent company indicators
@@ -1831,315 +1900,291 @@ def pass4(cbl_df, insurer_df, tolerance=100, global_tracker=None):
         - "ALTEO GROUP OF COMPANIES" → "ALTEO" (1 word - GROUP is parent indicator)
         → Result: All ALTEO subsidiaries match ALTEO GROUP ✓
         
-        # Corporate: Different companies with same prefix
-        - "CITY BEACH HOTELS" → "CITY BEACH" (2 words)
-        - "CITY SPORT LTD" → "CITY SPORT" (2 words)
-        - "CITY BROKERS" → "CITY BROKERS" (2 words)
-        → Result: CITY companies stay separate ✓
+        # Different companies with common words (prevented by first-word check)
+        - "SHA TRAVEL TOURS" → First word "SHA"
+        - "TAJ TRAVEL TOURS" → First word "TAJ"
+        → Result: Different companies stay separate ✓
+        
+        # Financial relationships (extract lessee)
+        - "MCB LEASING ONLEASE TO ECOBAT" → Extract "ECOBAT" (the lessee)
+        - "MCB LEASING LIMITED" → Extract "MCB LEASING"
+        → Result: ECOBAT grouped separately from MCB ✓
         
         # Person names: Extract 3 name words (skip titles)
         - "MRS MARIE BERTHE CHANTAL HARDY" → "MARIE BERTHE CHANTAL" (3 words)
         - "MRS MARIE DESIRE CATHERINE BOYER" → "MARIE DESIRE CATHERINE" (3 words)
-        - "MRS MARIE ODETTE HARDY" → "MARIE ODETTE HARDY" (3 words)
         → Result: Different people stay separate ✓
-    
-    This pass handles parent-subsidiary relationships and corporate group accounts
-    where the insurer may use aggregate names like "GROUP OF COMPANIES" or where
-    individual subsidiaries need to be matched to consolidated accounts.
+        
+        # Organizational prefixes: Extract property/building name
+        - "SYNDICAT DES COPROPRIETAIRES DE LES TERRASSES DU BARACHOIS" → "LES TERRASSES"
+        - "LE SYNDICAT DES COPROPRIETAIRES DU CENTRE FINANCIER DU NORD" → "CENTRE FINANCIER"
+        - "SYNDICAT DES COPROPRIETAIRES LA LUXURY PALMERAIE" → "LUXURY PALMERAIE"
+        → Result: Different syndicates stay separate by property name ✓
+        
+        # Fuzzy variations (caught by Phase 2)
+        - "ACME LIMITED" vs "ACME LTD" → 95% similarity → Match ✓
+        - "CITY BROKERS (MAURITIUS)" vs "CITY BROKERS LTD" → 90% similarity → Match ✓
     
     Args:
         cbl_df: CBL DataFrame with match results from previous passes
         insurer_df: Insurer DataFrame
         tolerance: Amount tolerance for exact match classification (default: 100)
+        fuzzy_threshold: Minimum similarity for fuzzy clustering (default: 85)
         global_tracker: GlobalMatchTracker instance for consistent row usage tracking
         
     Returns:
-        cbl_df: Updated CBL DataFrame with corporate group matches
+        cbl_df: Updated CBL DataFrame with name-based matches
     """
-    logger.info("\n=== Pass 4: Corporate Group Matching with Amount Validation ===")
-    logger.info("Business Rule: Group by corporate root name, then validate amounts")
-    logger.info(f"Amount Tolerance: Rs{tolerance} (within tolerance → Exact Match, beyond → Partial Match)")
-    
-    exact_matches = 0
-    partial_matches = 0
-    
-    logger.info(f"Pass 4 starting with global tracker: {global_tracker.get_usage_summary()}")
-    
-    # Get only "No Match" CBL records (not partial matches)
-    unmatched_cbl = cbl_df[cbl_df['match_status'] == 'No Match'].copy()
-    logger.info(f"Processing {len(unmatched_cbl)} CBL records with 'No Match' status")
-    
-    if unmatched_cbl.empty:
-        logger.info("No unmatched records to process")
-        return cbl_df
-    
-    # Use global tracker for consistent filtering
-    # Exclude exact and matrix matches but allow partial matches to be upgraded
-    already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
-    available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
-    logger.info(f"Pass 4: Using global tracker - excluding {len(already_matched_insurer)} exact/matrix used insurer rows")
-    logger.info(f"Pass 4: Available insurer rows for corporate group matching: {len(available_insurer)}")
-    
-    if available_insurer.empty:
-        logger.info("No available insurer records to match")
-        return cbl_df
-    
-    # Build corporate root indices
-    cbl_root_index = _build_corporate_root_index(unmatched_cbl, 'ClientName', 'CBL', min_occurrence=1)
-    insurer_root_index = _build_corporate_root_index(available_insurer, 'ClientName_INSURER', 'INSURER', min_occurrence=1)
-    
-    logger.info(f"\nFound {len(cbl_root_index)} CBL corporate groups")
-    logger.info(f"Found {len(insurer_root_index)} insurer corporate groups")
-    
-    if not cbl_root_index or not insurer_root_index:
-        logger.info("No corporate groups found for matching")
-        return cbl_df
-    
-    # Match corporate groups by root name
-    logger.info("\n=== Matching Corporate Groups ===")
-    group_counter = 0
-    
-    for root in cbl_root_index.keys():
-        if root in insurer_root_index:
-            group_counter += 1
-            group_id = f"CORPORATE_GROUP_{root}_{group_counter}"
-            
-            cbl_indices = cbl_root_index[root]
-            insurer_indices = insurer_root_index[root]
-            
-            # Calculate group totals for amount validation
-            cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
-            insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
-            difference = abs(cbl_total + insurer_total)
-            
-            # Classify match based on amount difference
-            match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
-            is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
-            
-            logger.info(f"\n🏢 Corporate Group Match Found:")
-            logger.info(f"  Group ID: {group_id}")
-            logger.info(f"  Corporate Root: {root}")
-            logger.info(f"  CBL Records: {len(cbl_indices)}")
-            logger.info(f"  Insurer Records: {len(insurer_indices)}")
-            logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
-            logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
-            logger.info(f"  Group Difference: Rs{difference:.2f}")
-            logger.info(f"  Match Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
-            
-            # Validate insurer indices are available based on match type
-            if is_exact_match:
-                can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
-            else:
-                # For partial matches, allow sharing
-                can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
-            
-            if not available_indices:
-                logger.warning(f"  ⚠ No available insurer indices - skipping corporate group")
-                continue
-            
-            if not can_use_all:
-                logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available insurer indices")
-                insurer_indices = available_indices
-                # Recalculate insurer total with available indices only
-                insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
-                difference = abs(cbl_total + insurer_total)
-                # Reclassify match based on new totals
-                match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
-                is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
-                logger.info(f"  Reclassified as: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence) after using available indices")
-            
-            # Apply matches to all CBL records in this corporate group
-            for cbl_idx in cbl_indices:
-                # Mark pass for tracking
-                add_pass(cbl_df, cbl_idx, 4)
-                
-                # Calculate amounts for this specific record (all records get same insurer pool)
-                total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
-                cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
-                
-                # Match reason with amount classification
-                match_reason = f"Corporate Group: {root} ({len(cbl_indices)} CBL records, {len(insurer_indices)} insurer records, Group Diff: Rs{difference:.2f}, {confidence} Confidence)"
-                
-                # Apply match based on amount validation
-                if is_exact_match:
-                    # Amounts match within tolerance - mark as Exact Match
-                    _apply_cluster_exact_match(
-                        cbl_df, cbl_idx, match_reason, insurer_indices,
-                        total_insurer_amount, 4, global_tracker,
-                        confidence_level=confidence,
-                        amount_difference=difference
-                    )
-                    exact_matches += 1
-                    logger.info(f"  ✓ CBL {cbl_idx}: EXACT MATCH with {len(insurer_indices)} insurer records (CBL: Rs{cbl_amount:.2f})")
-                else:
-                    # Amounts don't match - mark as Partial Match (main goal of Pass 4)
-                    partial_matches += _apply_partial_match(
-                        cbl_df, cbl_idx, match_reason, insurer_indices,
-                        total_insurer_amount, 4, global_tracker,
-                        confidence_level=confidence,
-                        amount_difference=difference
-                    )
-                    logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL MATCH with {len(insurer_indices)} insurer records (CBL: Rs{cbl_amount:.2f}, Diff: Rs{difference:.2f})")
-                
-                # Assign group metadata
-                cbl_df.at[cbl_idx, 'group_id'] = group_id
-                cbl_df.at[cbl_idx, 'corporate_root'] = root
-    
-    logger.info(f"\n✓ Pass 4 complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} corporate groups")
-    logger.info(f"   Main Goal Achieved: Moved {exact_matches + partial_matches} records from 'No Match' to matched status")
-    return cbl_df
-
-
-def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=90, global_tracker=None):
-    """Pass 3: Name-based Clustering and Grouping Strategy."""
-    logger.info("\n=== Pass 3: Name-based Clustering and Grouping ===")
-    logger.info("Strategy: Group CBL rows with similar insurer names, compare amounts to determine exact vs partial matches")
+    logger.info("\n=== Pass 3: Intelligent Name Matching (Corporate Root + Fuzzy Clustering) ===")
+    logger.info("Strategy: Phase 1 - Exact corporate root matching | Phase 2 - Fuzzy clustering fallback")
+    logger.info(f"Amount Tolerance: Rs{tolerance} (within → Exact Match, beyond → Partial Match)")
+    logger.info(f"Fuzzy Threshold: {fuzzy_threshold}%")
     
     exact_matches = 0
     partial_matches = 0
     
     logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
-    logger.info(f"Name Clustering Threshold: {fuzzy_threshold}%")
-
-    # Use global tracker for consistent filtering
-    # For Pass 3, we exclude exact and matrix matches but allow partial matches to be upgraded
-    already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
-    available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
-    logger.info(f"Pass 3: Using global tracker - excluding {len(already_matched_insurer)} exact/matrix used insurer rows")
-    logger.info(f"Pass 3: Available insurer rows for name clustering: {len(available_insurer)}")
     
-    # Get unmatched/partial CBL records
+    # Get unmatched or partial match CBL records
     unmatched_cbl = cbl_df[cbl_df['match_status'].isin(['No Match', 'Partial Match'])].copy()
-    logger.info(f"Pass 3: Processing {len(unmatched_cbl)} CBL records with 'No Match' or 'Partial Match' status")
+    logger.info(f"Processing {len(unmatched_cbl)} CBL records with 'No Match' or 'Partial Match' status")
     
     if unmatched_cbl.empty:
         logger.info("No unmatched records to process")
         return cbl_df
     
-    # Build name clusters using fuzzy matching
-    logger.info("\n=== Building Name Clusters ===")
-    cbl_name_clusters = _build_fuzzy_name_clusters(
-        unmatched_cbl,
-        name_column='ClientName',
-        fuzzy_threshold=fuzzy_threshold,
-        prefix="CBL"
-    )
+    # Use global tracker for consistent filtering
+    already_matched_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
+    available_insurer = insurer_df[~insurer_df.index.isin(already_matched_insurer)].copy()
+    logger.info(f"Pass 3: Using global tracker - excluding {len(already_matched_insurer)} exact/matrix used insurer rows")
+    logger.info(f"Pass 3: Available insurer rows for name matching: {len(available_insurer)}")
     
-    insurer_name_clusters = _build_fuzzy_name_clusters(
-        available_insurer,
-        name_column='ClientName_INSURER',  # Use original column, not cleaned
-        fuzzy_threshold=fuzzy_threshold,
-        prefix="INSURER"
-    )
+    if available_insurer.empty:
+        logger.info("No available insurer records to match")
+        return cbl_df
     
-    logger.info(f"Created {len(cbl_name_clusters)} CBL name clusters and {len(insurer_name_clusters)} insurer name clusters")
+    # ========== PHASE 1: EXACT CORPORATE ROOT MATCHING ==========
+    logger.info("\n=== Phase 1: Exact Corporate Root Matching ===")
     
-    # Match clusters together
-    logger.info("\n=== Matching Clusters ===")
+    # Build corporate root indices
+    cbl_root_index = _build_corporate_root_index(unmatched_cbl, 'ClientName', 'CBL', min_occurrence=1)
+    insurer_root_index = _build_corporate_root_index(available_insurer, 'ClientName_INSURER', 'INSURER', min_occurrence=1)
+    
+    logger.info(f"Found {len(cbl_root_index)} CBL corporate roots")
+    logger.info(f"Found {len(insurer_root_index)} insurer corporate roots")
+    
+    # Track which CBL indices were matched in Phase 1
+    phase1_matched_cbl = set()
     group_counter = 0
     
-    # Use CompanyNameMatcher for cross-cluster matching to handle compound names
-    matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
-    
-    for cbl_cluster_name, cbl_indices in cbl_name_clusters.items():
-        for insurer_cluster_name, insurer_indices in insurer_name_clusters.items():
-            # Use intelligent similarity calculation for cross-cluster matching
-            cluster_similarity = matcher.calculate_intelligent_similarity(cbl_cluster_name, insurer_cluster_name)
-            
-            # Use stricter threshold for cluster matching (90% vs 95% for within-cluster)
-            # This ensures only very similar clusters are matched together
-            if cluster_similarity >= 90:
-                # ADDITIONAL VALIDATION: Check word overlap to prevent false positive cross-cluster matches
-                # This prevents matching unrelated companies that share only one common word
-                has_overlap, common_count, common_words = _has_sufficient_word_overlap(
-                    cbl_cluster_name, insurer_cluster_name, min_common_words=2
-                )
-                
-                if not has_overlap:
-                    logger.debug(f"Rejected cross-cluster match despite {cluster_similarity}% similarity: "
-                               f"'{cbl_cluster_name[:50]}' vs '{insurer_cluster_name[:50]}' "
-                               f"(only {common_count} common words: {common_words})")
-                    continue
+    if cbl_root_index and insurer_root_index:
+        logger.info("\n--- Matching by Exact Corporate Root ---")
+        
+        for root in cbl_root_index.keys():
+            if root in insurer_root_index:
                 group_counter += 1
-                group_id = f"NAME_GROUP_{group_counter}"
+                group_id = f"NAME_GROUP_{group_counter}_ROOT"
                 
-                # Calculate totals for the entire group
+                cbl_indices = cbl_root_index[root]
+                insurer_indices = insurer_root_index[root]
+                
+                # Calculate group totals for amount validation
                 cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
                 insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
                 difference = abs(cbl_total + insurer_total)
                 
-                # Classify the match based on amount difference
+                # Classify match based on amount difference
                 match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
                 is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
                 
-                logger.info(f"\n🎯 Cluster Match Found:")
+                logger.info(f"\n🏢 Corporate Root Match Found:")
                 logger.info(f"  Group ID: {group_id}")
-                logger.info(f"  CBL Cluster: '{cbl_cluster_name[:60]}...' ({len(cbl_indices)} records)")
-                logger.info(f"  Insurer Cluster: '{insurer_cluster_name[:60]}...' ({len(insurer_indices)} records)")
-                logger.info(f"  Cluster Name Similarity: {cluster_similarity}% (threshold: 90%)")
+                logger.info(f"  Corporate Root: {root}")
+                logger.info(f"  CBL Records: {len(cbl_indices)}")
+                logger.info(f"  Insurer Records: {len(insurer_indices)}")
                 logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
                 logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
                 logger.info(f"  Difference: Rs{difference:.2f}")
-                logger.info(f"  Match Type: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+                logger.info(f"  Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
                 
-                # Validate insurer indices are available
+                # Validate insurer indices availability
                 if is_exact_match:
                     can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
                 else:
-                    can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices)
+                    can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
                 
                 if not available_indices:
-                    logger.warning(f"  ⚠ No available insurer indices - skipping cluster match")
+                    logger.warning(f"  ⚠ No available insurer indices - skipping group")
                     continue
                 
                 if not can_use_all:
-                    logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available insurer indices")
+                    logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available indices")
                     insurer_indices = available_indices
-                    
-                # Apply the SAME match to ALL CBL records in the cluster
-                # All CBL rows get the same insurer indices and same match status
+                    # Recalculate with available indices
+                    insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+                    difference = abs(cbl_total + insurer_total)
+                    match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
+                    is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+                    logger.info(f"  Reclassified: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+                
+                # Apply matches to all CBL records in this group
                 for cbl_idx in cbl_indices:
-                    # Mark pass for tracking
                     add_pass(cbl_df, cbl_idx, 3)
+                    phase1_matched_cbl.add(cbl_idx)
                     
-                    # All CBL rows in the cluster get the SAME insurer indices
-                    # No need to check individual conflicts since we validated at cluster level
-                    usable_indices = insurer_indices
-                    
-                    # Calculate total amount for this specific CBL row's match
-                    total_insurer_amount = available_insurer.loc[usable_indices, "ProcessedAmount_Clean_INSURER"].sum()
+                    total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
                     cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
-                    amount_diff = abs(cbl_amount + total_insurer_amount)
                     
-                    # Create match reason
-                    match_reason = f"Name Cluster Match (Cluster: '{cbl_cluster_name[:30]}...', Similarity: {cluster_similarity}%, Amount Diff: Rs{amount_diff:.2f})"
+                    match_reason = f"Corporate Root: {root} ({len(cbl_indices)} CBL, {len(insurer_indices)} insurer, Diff: Rs{difference:.2f}, {confidence})"
                     
-                    # Apply the appropriate match type (same for all CBL rows in cluster)
                     if is_exact_match:
-                        # For Pass 3 cluster matching, use direct assignment to allow sharing
                         _apply_cluster_exact_match(
-                            cbl_df, cbl_idx, match_reason, usable_indices,
+                            cbl_df, cbl_idx, match_reason, insurer_indices,
                             total_insurer_amount, 3, global_tracker,
                             confidence_level=confidence,
-                            amount_difference=amount_diff
+                            amount_difference=difference
                         )
                         exact_matches += 1
-                        logger.info(f"  ✓ CBL {cbl_idx}: EXACT match with {len(usable_indices)} insurer records")
+                        logger.info(f"  ✓ CBL {cbl_idx}: EXACT (CBL: Rs{cbl_amount:.2f})")
                     else:
-                        # Mark as partial match
                         partial_matches += _apply_partial_match(
-                            cbl_df, cbl_idx, match_reason, usable_indices,
+                            cbl_df, cbl_idx, match_reason, insurer_indices,
                             total_insurer_amount, 3, global_tracker,
                             confidence_level=confidence,
-                            amount_difference=amount_diff
+                            amount_difference=difference
                         )
-                        logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL match with {len(usable_indices)} insurer records")
+                        logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL (CBL: Rs{cbl_amount:.2f})")
                     
-                    # Assign group_id for output organization
                     cbl_df.at[cbl_idx, 'group_id'] = group_id
+                    cbl_df.at[cbl_idx, 'corporate_root'] = root
+        
+        logger.info(f"\n✓ Phase 1 Complete: {len(phase1_matched_cbl)} CBL records matched by corporate root")
+    else:
+        logger.info("No corporate root matches found")
     
-    # NEW: Merge groups with overlapping insurer indices
-    cbl_df = _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker)
+    # ========== PHASE 2: FUZZY CLUSTERING FALLBACK ==========
+    logger.info("\n=== Phase 2: Fuzzy Clustering Fallback (for remaining records) ===")
+    
+    # Get CBL records that weren't matched in Phase 1
+    remaining_cbl = unmatched_cbl[~unmatched_cbl.index.isin(phase1_matched_cbl)].copy()
+    logger.info(f"Processing {len(remaining_cbl)} remaining CBL records with fuzzy clustering")
+    
+    if not remaining_cbl.empty:
+        # Build fuzzy name clusters
+        cbl_name_clusters = _build_fuzzy_name_clusters(
+            remaining_cbl,
+            name_column='ClientName',
+            fuzzy_threshold=fuzzy_threshold,
+            prefix="CBL"
+        )
+        
+        insurer_name_clusters = _build_fuzzy_name_clusters(
+            available_insurer,
+            name_column='ClientName_INSURER',
+            fuzzy_threshold=fuzzy_threshold,
+            prefix="INSURER"
+        )
+        
+        logger.info(f"Created {len(cbl_name_clusters)} CBL clusters, {len(insurer_name_clusters)} insurer clusters")
+        
+        if cbl_name_clusters and insurer_name_clusters:
+            logger.info("\n--- Matching Fuzzy Clusters ---")
+            
+            # Use CompanyNameMatcher for cross-cluster matching
+            matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
+            
+            for cbl_cluster_name, cbl_indices in cbl_name_clusters.items():
+                for insurer_cluster_name, insurer_indices in insurer_name_clusters.items():
+                    # Use intelligent similarity calculation
+                    cluster_similarity = matcher.calculate_intelligent_similarity(cbl_cluster_name, insurer_cluster_name)
+                    
+                    if cluster_similarity >= fuzzy_threshold:
+                        # VALIDATION: Check word overlap to prevent false positives
+                        has_overlap, common_count, common_words = _has_sufficient_word_overlap(
+                            cbl_cluster_name, insurer_cluster_name, min_common_words=2
+                        )
                         
-    logger.info(f"\n✓ Pass 3 complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} name groups")
+                        if not has_overlap:
+                            logger.debug(f"Rejected cross-cluster match: '{cbl_cluster_name[:40]}' vs '{insurer_cluster_name[:40]}' "
+                                       f"(only {common_count} common words: {common_words})")
+                            continue
+                        
+                        group_counter += 1
+                        group_id = f"NAME_GROUP_{group_counter}_FUZZY"
+                        
+                        # Calculate totals
+                        cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+                        insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+                        difference = abs(cbl_total + insurer_total)
+                        
+                        # Classify match
+                        match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
+                        is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+                        
+                        logger.info(f"\n🎯 Fuzzy Cluster Match Found:")
+                        logger.info(f"  Group ID: {group_id}")
+                        logger.info(f"  CBL Cluster: '{cbl_cluster_name[:50]}...' ({len(cbl_indices)} records)")
+                        logger.info(f"  Insurer Cluster: '{insurer_cluster_name[:50]}...' ({len(insurer_indices)} records)")
+                        logger.info(f"  Similarity: {cluster_similarity}%")
+                        logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
+                        logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
+                        logger.info(f"  Difference: Rs{difference:.2f}")
+                        logger.info(f"  Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+                        
+                        # Validate availability
+                        if is_exact_match:
+                            can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
+                        else:
+                            can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
+                        
+                        if not available_indices:
+                            logger.warning(f"  ⚠ No available insurer indices - skipping cluster")
+                            continue
+                        
+                        if not can_use_all:
+                            logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available indices")
+                            insurer_indices = available_indices
+                        
+                        # Apply matches
+                        for cbl_idx in cbl_indices:
+                            add_pass(cbl_df, cbl_idx, 3)
+                            
+                            total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
+                            cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
+                            amount_diff = abs(cbl_amount + total_insurer_amount)
+                            
+                            match_reason = f"Fuzzy Cluster: '{cbl_cluster_name[:30]}...' (Sim: {cluster_similarity}%, Diff: Rs{amount_diff:.2f})"
+                            
+                            if is_exact_match:
+                                _apply_cluster_exact_match(
+                                    cbl_df, cbl_idx, match_reason, insurer_indices,
+                                    total_insurer_amount, 3, global_tracker,
+                                    confidence_level=confidence,
+                                    amount_difference=amount_diff
+                                )
+                                exact_matches += 1
+                                logger.info(f"  ✓ CBL {cbl_idx}: EXACT (CBL: Rs{cbl_amount:.2f})")
+                            else:
+                                partial_matches += _apply_partial_match(
+                                    cbl_df, cbl_idx, match_reason, insurer_indices,
+                                    total_insurer_amount, 3, global_tracker,
+                                    confidence_level=confidence,
+                                    amount_difference=amount_diff
+                                )
+                                logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL (CBL: Rs{cbl_amount:.2f})")
+                            
+                            cbl_df.at[cbl_idx, 'group_id'] = group_id
+            
+            logger.info(f"\n✓ Phase 2 Complete: Fuzzy clustering processed remaining records")
+        else:
+            logger.info("No fuzzy clusters created")
+    else:
+        logger.info("No remaining records for fuzzy clustering")
+    
+    # ========== PHASE 3: MERGE GROUPS WITH OVERLAPPING INSURER INDICES ==========
+    cbl_df = _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker)
+    
+    logger.info(f"\n✓ Pass 3 Complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} name groups")
+    logger.info(f"   Phase 1 (Corporate Root): Matched {len(phase1_matched_cbl)} records")
+    logger.info(f"   Phase 2 (Fuzzy Clustering): Matched remaining records")
     return cbl_df

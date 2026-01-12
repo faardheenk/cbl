@@ -5,7 +5,7 @@ import logging
 import os
 from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
-from .matching_engine import pass1, pass2, pass3, pass4, GlobalMatchTracker
+from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
 from .output_handler import explode_and_merge
 import io
 
@@ -128,26 +128,20 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
             if global_tracker:
                 logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
             
-            # Pass 3: Requires ClientName and ProcessedAmount
+            # Pass 3: Intelligent Name Matching (Corporate Root + Fuzzy Clustering)
+            # This pass combines two strategies:
+            #   Phase 1: Exact corporate root matching (fast, precise)
+            #   Phase 2: Fuzzy clustering fallback (catches typos/variations)
+            # Requires ClientName and ProcessedAmount
             if has_required_keys(['ClientName', 'ProcessedAmount'], ['ClientName', 'ProcessedAmount']):
-                logger.info("✓ Pass 3: Required keys found in mappings - running Pass 3 with global tracking")
-                # Using 95% threshold for Pass 3 name clustering (stricter to prevent over-clustering)
+                logger.info("✓ Pass 3: Required keys found in mappings - running Intelligent Name Matching with global tracking")
+                # Using 95% threshold for fuzzy clustering (Phase 2) - stricter to prevent over-clustering
                 clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
             else:
                 logger.info("⚠ Pass 3: Required keys (ClientName, ProcessedAmount) not found in mappings - skipping Pass 3")
             
-            # Log global tracker status after Pass 3
-            if global_tracker:
-                logger.info(f"📊 After Pass 3: {global_tracker.get_usage_summary()}")
-            
-            # Pass 4: Corporate Group Matching (requires only ClientName)
-            if has_required_keys(['ClientName'], ['ClientName']):
-                logger.info("✓ Pass 4: Required keys found in mappings - running Pass 4 Corporate Group Matching")
-                clean_cbl = pass4(clean_cbl, clean_insurer, tolerance, global_tracker)
-            else:
-                logger.info("⚠ Pass 4: Required keys (ClientName) not found in mappings - skipping Pass 4")
-            
-            # Log final global tracker status
+            # Log final global tracker status after Pass 3
+            # Note: Pass 3 now includes corporate root matching (formerly Pass 4) in Phase 1
             if global_tracker:
                 final_summary = global_tracker.get_usage_summary()
                 logger.info(f"🎯 Final Global Tracker Summary: {final_summary}")
