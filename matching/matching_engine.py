@@ -1798,39 +1798,217 @@ def _extract_corporate_root(name, max_words=2):
     return ' '.join(distinctive_words)
 
 
-def _build_corporate_root_index(df, name_column, prefix="", min_occurrence=2):
+def _get_primary_corporate_root(name, max_words=2):
+    """
+    Get the PRIMARY (first) corporate root from a name.
+    
+    For compound names like "KASA GROUP OF COMPANIES - REY AND LENFERNA LTD &/OR ...",
+    this returns only the PRIMARY entity's root (e.g., "KASA"), not secondary
+    entities that appear after separators.
+    
+    This is used for GROUP ASSIGNMENT: a CBL row should only be assigned to
+    a group that matches its PRIMARY root, not secondary subsidiaries.
+    
+    Examples:
+        "KASA GROUP OF COMPANIES - REY AND LENFERNA LTD &/OR CEAL LTEE"
+        → "KASA" (primary entity)
+        
+        "GALEA GROUP OF COMPANIES - REY AND LENFERNA LTD &/OR KASA CORPORATE"
+        → "GALEA" (primary entity, not KASA or REY)
+        
+        "REY & LENFERNA LTD"
+        → "REY LENFERNA" (simple name)
+    
+    Args:
+        name: Company name string
+        max_words: Max distinctive words (default: 2)
+        
+    Returns:
+        str: The PRIMARY corporate root, or empty string if none
+    """
+    if not name or pd.isna(name):
+        return ""
+    
+    name_upper = str(name).upper().strip()
+    
+    # First, extract the PRIMARY entity (before any group indicator like " - ")
+    # e.g., "KASA GROUP OF COMPANIES - REY..." → "KASA GROUP OF COMPANIES"
+    primary_indicators = [' - ', ' – ', ' — ']
+    for indicator in primary_indicators:
+        if indicator in name_upper:
+            name_upper = name_upper.split(indicator)[0].strip()
+            break
+    
+    # Now extract the corporate root from the primary entity
+    # This handles compound primary entities like "PALCO LTD &/OR TBA LTEE"
+    # by returning only the FIRST root
+    roots = _extract_all_corporate_roots(name_upper, max_words)
+    return roots[0] if roots else ""
+
+
+def _extract_all_corporate_roots(name, max_words=2):
+    """
+    Extract ALL corporate roots from a name (handles compound names).
+    
+    For compound names like "PALCO LTD &/OR TBA LTEE &/OR AIRSTREAM LTD",
+    this extracts roots for EACH entity: ["PALCO", "TBA", "AIRSTREAM"]
+    
+    This enables matching regardless of entity order between CBL and insurer data.
+    
+    For simple names (no compound separators), returns a single-element list
+    with the same result as _extract_corporate_root().
+    
+    Examples:
+        # Compound name - extracts ALL entity roots:
+        "PALCO WATERPROOFING LTD &/OR TBA (MAURICE) LTEE &/OR AIRSTREAM LTD"
+        → ["PALCO WATERPROOFING", "TBA MAURICE", "AIRSTREAM"]
+        
+        # Same entities, different order - produces same roots (order may vary):
+        "TBA (MAURICE) LTEE &/OR PALCO WATERPROOFING LTD &/OR AIRSTREAM LTD"
+        → ["TBA MAURICE", "PALCO WATERPROOFING", "AIRSTREAM"]
+        
+        # Simple name - single root (existing behavior):
+        "ACME HOLDINGS LTD"
+        → ["ACME"]
+        
+        # Filters out generic terms:
+        "PALCO LTD &/OR SUBSIDIARIES &/OR AFFILIATED COMPANIES"
+        → ["PALCO"]  (SUBSIDIARIES and AFFILIATED COMPANIES are skipped)
+    
+    Args:
+        name: Company name string (potentially compound)
+        max_words: Max distinctive words per entity (default: 2)
+        
+    Returns:
+        list: List of corporate roots (1 for simple names, multiple for compound)
+    """
+    if not name or pd.isna(name):
+        return []
+    
+    name_upper = str(name).upper().strip()
+    
+    # Check if this is a compound name
+    compound_separators = ['&/OR', '&OR', 'AND/OR', 'ANDOR', '&/']
+    is_compound = any(sep in name_upper for sep in compound_separators)
+    
+    if not is_compound:
+        # Simple name - return single root (existing behavior)
+        root = _extract_corporate_root(name, max_words)
+        return [root] if root else []
+    
+    # Compound name - extract roots for ALL entities
+    roots = []
+    
+    # Generic terms that don't represent actual companies - skip these
+    GENERIC_TERMS = {
+        'SUBSIDIARIES', 'SUBSIDIARY', 'ASSOCIATES', 'ASSOCIATED COMPANIES',
+        'AFFILIATED COMPANIES', 'AFFILIATES', 'RELATED COMPANIES',
+        'SISTER COMPANIES', 'HOLDING COMPANIES', 'PARENT COMPANY',
+        'TBA', 'TO BE ADVISED', 'TO BE ANNOUNCED', 'TO BE CONFIRMED'
+    }
+    
+    # Split on compound separators progressively
+    entities = [name_upper]
+    for separator in compound_separators:
+        new_entities = []
+        for entity in entities:
+            parts = entity.split(separator)
+            new_entities.extend(parts)
+        entities = new_entities
+    
+    # Extract root from each entity
+    compound_entity_count = 0
+    for entity in entities:
+        entity = entity.strip()
+        
+        # Skip empty strings
+        if not entity:
+            continue
+            
+        # Skip generic terms that don't represent actual companies
+        if entity in GENERIC_TERMS:
+            logger.debug(f"Skipping generic term in compound name: '{entity}'")
+            continue
+        
+        compound_entity_count += 1
+        root = _extract_corporate_root(entity, max_words)
+        
+        if root and root not in roots:  # Avoid duplicates
+            roots.append(root)
+            logger.debug(f"Compound entity '{entity[:40]}...' → root '{root}'")
+    
+    if len(roots) > 1:
+        logger.debug(f"Compound name extracted {len(roots)} roots from {compound_entity_count} entities: {roots[:5]}{'...' if len(roots) > 5 else ''}")
+    
+    return roots
+
+
+def _build_corporate_root_index(df, name_column, prefix="", min_occurrence=2, return_primary_map=False):
     """
     Build an index of corporate roots and their associated record indices.
     
     Groups records by their corporate root identifier, filtering out roots that
     don't meet the minimum occurrence threshold (to avoid noise from unique names).
     
+    COMPOUND NAME SUPPORT:
+    For compound names (e.g., "PALCO LTD &/OR TBA LTEE &/OR AIRSTREAM LTD"),
+    the record is indexed under ALL entity roots, not just the first.
+    This enables matching regardless of entity order between CBL and insurer.
+    
+    Example:
+        CBL: "PALCO LTD &/OR TBA LTEE" → indexed under ["PALCO", "TBA"]
+        Insurer: "TBA LTEE &/OR PALCO LTD" → indexed under ["TBA", "PALCO"]
+        → They'll match on EITHER root!
+    
     Args:
         df: DataFrame to index
         name_column: Column name containing company names
         prefix: Logging prefix (e.g., "CBL" or "INSURER")
         min_occurrence: Minimum number of records required for a root to be included
+        return_primary_map: If True, also returns a map of idx → primary_root
         
     Returns:
         dict: {corporate_root: [list of record indices]}
+        (optional) dict: {idx: primary_root} if return_primary_map=True
     """
     logger.info(f"\n=== Building Corporate Root Index for {prefix} ===")
     
     root_index = {}
+    primary_root_map = {}  # idx → primary root (for group assignment)
     no_root_count = 0
+    compound_name_count = 0
+    multi_indexed_count = 0
     
     for idx, row in df.iterrows():
         name = row.get(name_column, '')
-        root = _extract_corporate_root(name)
         
-        if root:
-            if root not in root_index:
-                root_index[root] = []
-            root_index[root].append(idx)
+        # Use multi-root extraction for compound name support
+        roots = _extract_all_corporate_roots(name)
+        
+        # Also track the PRIMARY root (for group assignment decisions)
+        primary_root = _get_primary_corporate_root(name)
+        if primary_root:
+            primary_root_map[idx] = primary_root
+        
+        if roots:
+            # Track compound names for logging
+            if len(roots) > 1:
+                compound_name_count += 1
+                multi_indexed_count += len(roots)
+            
+            # Index this record under ALL extracted roots
+            for root in roots:
+                if root not in root_index:
+                    root_index[root] = []
+                # Avoid duplicate indices under same root
+                if idx not in root_index[root]:
+                    root_index[root].append(idx)
         else:
             no_root_count += 1
     
     logger.info(f"Extracted {len(root_index)} unique corporate roots from {len(df)} records")
+    if compound_name_count > 0:
+        logger.info(f"  📋 {compound_name_count} compound names detected → created {multi_indexed_count} additional index entries")
     if no_root_count > 0:
         logger.info(f"  ⚠️ {no_root_count} records had no extractable corporate root")
     
@@ -1856,6 +2034,8 @@ def _build_corporate_root_index(df, name_column, prefix="", min_occurrence=2):
         if len(sorted_roots) > 10:
             logger.info(f"    ... and {len(sorted_roots) - 10} more roots")
     
+    if return_primary_map:
+        return filtered_index, primary_root_map
     return filtered_index
 
 
@@ -1967,96 +2147,203 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=85, global_tracker=
     logger.info("\n=== Phase 1: Exact Corporate Root Matching ===")
     
     # Build corporate root indices
-    cbl_root_index = _build_corporate_root_index(unmatched_cbl, 'ClientName', 'CBL', min_occurrence=1)
+    # For CBL: also get primary_root_map to control group assignment
+    cbl_root_index, cbl_primary_root_map = _build_corporate_root_index(
+        unmatched_cbl, 'ClientName', 'CBL', min_occurrence=1, return_primary_map=True
+    )
     insurer_root_index = _build_corporate_root_index(available_insurer, 'ClientName_INSURER', 'INSURER', min_occurrence=1)
     
     logger.info(f"Found {len(cbl_root_index)} CBL corporate roots")
     logger.info(f"Found {len(insurer_root_index)} insurer corporate roots")
+    logger.info(f"Tracked {len(cbl_primary_root_map)} CBL primary roots for group assignment")
     
     # Track which CBL indices were matched in Phase 1
     phase1_matched_cbl = set()
     group_counter = 0
     
     if cbl_root_index and insurer_root_index:
-        logger.info("\n--- Matching by Exact Corporate Root ---")
+        logger.info("\n--- Pre-grouping: Consolidating CBL records using PRIMARY ROOT assignment ---")
+        logger.info("  📌 Key change: CBL rows are only added to groups that match their PRIMARY root")
+        logger.info("     e.g., 'KASA GROUP... - REY...' → assigned to KASA group only (not REY)")
+        
+        # STEP 1: Collect all root matches (without applying yet)
+        # KEY CHANGE: Only add a CBL to a group if the group's root matches CBL's PRIMARY root
+        # This prevents compound names like "KASA GROUP... - REY..." from being assigned to REY group
+        
+        # Map: insurer_indices_tuple -> {cbl_indices: set, roots: list}
+        insurer_to_cbl_groups = {}
+        
+        # Track skipped assignments for logging
+        skipped_secondary_assignments = 0
         
         for root in cbl_root_index.keys():
             if root in insurer_root_index:
-                group_counter += 1
-                group_id = f"NAME_GROUP_{group_counter}_ROOT"
+                insurer_indices = tuple(sorted(insurer_root_index[root]))  # Tuple for hashing
                 
-                cbl_indices = cbl_root_index[root]
-                insurer_indices = insurer_root_index[root]
+                if insurer_indices not in insurer_to_cbl_groups:
+                    insurer_to_cbl_groups[insurer_indices] = {
+                        'cbl_indices': set(),
+                        'roots': []
+                    }
                 
-                # Calculate group totals for amount validation
-                cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+                # KEY FIX: Only add CBL indices where this root is the PRIMARY root
+                # This ensures "KASA GROUP... - REY..." goes to KASA group, not REY group
+                for cbl_idx in cbl_root_index[root]:
+                    primary_root = cbl_primary_root_map.get(cbl_idx, "")
+                    
+                    # Check if this root matches the CBL's primary root
+                    if primary_root == root:
+                        # Direct match - add to group
+                        insurer_to_cbl_groups[insurer_indices]['cbl_indices'].add(cbl_idx)
+                    elif not primary_root:
+                        # No primary root extracted (edge case) - add to group
+                        insurer_to_cbl_groups[insurer_indices]['cbl_indices'].add(cbl_idx)
+                    else:
+                        # This root is a SECONDARY root for this CBL (e.g., REY in "KASA... - REY...")
+                        # Skip - this CBL should be assigned via its PRIMARY root
+                        skipped_secondary_assignments += 1
+                        logger.debug(f"Skipping secondary assignment: CBL {cbl_idx} matched on '{root}' but primary is '{primary_root}'")
+                
+                if root not in insurer_to_cbl_groups[insurer_indices]['roots']:
+                    insurer_to_cbl_groups[insurer_indices]['roots'].append(root)
+        
+        # Log pre-grouping results
+        if insurer_to_cbl_groups:
+            multi_cbl_groups = sum(1 for g in insurer_to_cbl_groups.values() if len(g['cbl_indices']) > 1)
+            multi_root_groups = sum(1 for g in insurer_to_cbl_groups.values() if len(g['roots']) > 1)
+            logger.info(f"  📊 Pre-grouping Results:")
+            logger.info(f"     - Total insurer groups: {len(insurer_to_cbl_groups)}")
+            logger.info(f"     - Groups with multiple CBL records: {multi_cbl_groups}")
+            logger.info(f"     - Groups matched via multiple roots: {multi_root_groups}")
+            if skipped_secondary_assignments > 0:
+                logger.info(f"     - ✅ Skipped {skipped_secondary_assignments} secondary root assignments (prevented cross-group duplication)")
+            
+            # Log groups that would have caused duplication
+            for insurer_indices, group_data in insurer_to_cbl_groups.items():
+                if len(group_data['roots']) > 1:
+                    logger.info(f"     ⚠️ Insurer indices {list(insurer_indices)[:3]}... matched via {len(group_data['roots'])} roots: {group_data['roots'][:5]}")
+                    logger.info(f"        → Contains {len(group_data['cbl_indices'])} CBL records (primary-root filtered)")
+        
+        # Remove empty groups (all CBL rows filtered out due to primary root logic)
+        insurer_to_cbl_groups = {
+            k: v for k, v in insurer_to_cbl_groups.items() 
+            if len(v['cbl_indices']) > 0
+        }
+        
+        logger.info("\n--- Matching Consolidated Groups ---")
+        
+        # STEP 2: Apply matches at the consolidated group level (not per-root)
+        # Sort by number of CBL rows for consistent ordering
+        sorted_groups = sorted(
+            insurer_to_cbl_groups.items(),
+            key=lambda x: len(x[1]['cbl_indices']),
+            reverse=True  # Largest groups first
+        )
+        
+        logger.info(f"  📋 Processing {len(sorted_groups)} groups (primary-root filtered)")
+        
+        for insurer_indices_tuple, group_data in sorted_groups:
+            insurer_indices = list(insurer_indices_tuple)
+            cbl_indices = list(group_data['cbl_indices'])
+            matched_roots = group_data['roots']
+            
+            group_counter += 1
+            group_id = f"NAME_GROUP_{group_counter}_ROOT"
+            
+            # Calculate group totals for amount validation
+            cbl_total = cbl_df.loc[cbl_indices, 'ProcessedAmount_Clean'].sum()
+            insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+            difference = abs(cbl_total + insurer_total)
+            
+            # Classify match based on amount difference
+            match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
+            is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+            
+            # Format roots for display
+            roots_display = ', '.join(matched_roots[:3]) + ('...' if len(matched_roots) > 3 else '')
+            
+            logger.info(f"\n🏢 Corporate Root Match Found:")
+            logger.info(f"  Group ID: {group_id}")
+            logger.info(f"  Corporate Root(s): {roots_display} ({len(matched_roots)} total)")
+            logger.info(f"  CBL Records: {len(cbl_indices)}")
+            logger.info(f"  Insurer Records: {len(insurer_indices)}")
+            logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
+            logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
+            logger.info(f"  Difference: Rs{difference:.2f}")
+            logger.info(f"  Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+            
+            # Validate insurer indices availability
+            if is_exact_match:
+                can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
+            else:
+                # Use allow_sharing=False to prevent duplication across groups
+                can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=False)
+            
+            if not available_indices:
+                logger.warning(f"  ⚠ No available insurer indices - skipping group")
+                continue
+            
+            if not can_use_all:
+                logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available indices")
+                insurer_indices = available_indices
+                # Recalculate with available indices
                 insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
                 difference = abs(cbl_total + insurer_total)
-                
-                # Classify match based on amount difference
                 match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
                 is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+                logger.info(f"  Reclassified: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+            
+            # Apply matches to all CBL records in this consolidated group
+            # IMPORTANT: Filter out CBL rows already matched to another group
+            # This prevents overwriting when a CBL row has multiple roots (e.g., compound names)
+            unmatched_cbl_in_group = [idx for idx in cbl_indices if idx not in phase1_matched_cbl]
+            skipped_count = len(cbl_indices) - len(unmatched_cbl_in_group)
+            
+            if skipped_count > 0:
+                logger.info(f"  ℹ️ {skipped_count} CBL row(s) already matched to another group - skipping")
                 
-                logger.info(f"\n🏢 Corporate Root Match Found:")
-                logger.info(f"  Group ID: {group_id}")
-                logger.info(f"  Corporate Root: {root}")
-                logger.info(f"  CBL Records: {len(cbl_indices)}")
-                logger.info(f"  Insurer Records: {len(insurer_indices)}")
-                logger.info(f"  CBL Total: Rs{cbl_total:.2f}")
-                logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
-                logger.info(f"  Difference: Rs{difference:.2f}")
-                logger.info(f"  Classification: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
-                
-                # Validate insurer indices availability
-                if is_exact_match:
-                    can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
-                else:
-                    can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
-                
-                if not available_indices:
-                    logger.warning(f"  ⚠ No available insurer indices - skipping group")
-                    continue
-                
-                if not can_use_all:
-                    logger.info(f"  ℹ Using {len(available_indices)}/{len(insurer_indices)} available indices")
-                    insurer_indices = available_indices
-                    # Recalculate with available indices
-                    insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+                # Recalculate totals with only unmatched CBL rows
+                if unmatched_cbl_in_group:
+                    cbl_total = cbl_df.loc[unmatched_cbl_in_group, 'ProcessedAmount_Clean'].sum()
                     difference = abs(cbl_total + insurer_total)
                     match_type, _, confidence = classify_amount_match(cbl_total, insurer_total, tolerance)
                     is_exact_match = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
-                    logger.info(f"  Reclassified: {'EXACT' if is_exact_match else 'PARTIAL'} ({confidence} Confidence)")
+                    logger.info(f"  Recalculated with {len(unmatched_cbl_in_group)} CBL rows: Diff Rs{difference:.2f}, {'EXACT' if is_exact_match else 'PARTIAL'}")
+            
+            if not unmatched_cbl_in_group:
+                logger.warning(f"  ⚠ No unmatched CBL rows remaining in this group - skipping entirely")
+                continue
+            
+            for cbl_idx in unmatched_cbl_in_group:
+                add_pass(cbl_df, cbl_idx, 3)
+                phase1_matched_cbl.add(cbl_idx)
                 
-                # Apply matches to all CBL records in this group
-                for cbl_idx in cbl_indices:
-                    add_pass(cbl_df, cbl_idx, 3)
-                    phase1_matched_cbl.add(cbl_idx)
-                    
-                    total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
-                    cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
-                    
-                    match_reason = f"Corporate Root: {root} ({len(cbl_indices)} CBL, {len(insurer_indices)} insurer, Diff: Rs{difference:.2f}, {confidence})"
-                    
-                    if is_exact_match:
-                        _apply_cluster_exact_match(
-                            cbl_df, cbl_idx, match_reason, insurer_indices,
-                            total_insurer_amount, 3, global_tracker,
-                            confidence_level=confidence,
-                            amount_difference=difference
-                        )
-                        exact_matches += 1
-                        logger.info(f"  ✓ CBL {cbl_idx}: EXACT (CBL: Rs{cbl_amount:.2f})")
-                    else:
-                        partial_matches += _apply_partial_match(
-                            cbl_df, cbl_idx, match_reason, insurer_indices,
-                            total_insurer_amount, 3, global_tracker,
-                            confidence_level=confidence,
-                            amount_difference=difference
-                        )
-                        logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL (CBL: Rs{cbl_amount:.2f})")
-                    
-                    cbl_df.at[cbl_idx, 'group_id'] = group_id
-                    cbl_df.at[cbl_idx, 'corporate_root'] = root
+                total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
+                cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
+                
+                # Include all matched roots in the reason
+                match_reason = f"Corporate Root: {roots_display} ({len(unmatched_cbl_in_group)} CBL, {len(insurer_indices)} insurer, Diff: Rs{difference:.2f}, {confidence})"
+                
+                if is_exact_match:
+                    _apply_cluster_exact_match(
+                        cbl_df, cbl_idx, match_reason, insurer_indices,
+                        total_insurer_amount, 3, global_tracker,
+                        confidence_level=confidence,
+                        amount_difference=difference
+                    )
+                    exact_matches += 1
+                    logger.info(f"  ✓ CBL {cbl_idx}: EXACT (CBL: Rs{cbl_amount:.2f})")
+                else:
+                    partial_matches += _apply_partial_match(
+                        cbl_df, cbl_idx, match_reason, insurer_indices,
+                        total_insurer_amount, 3, global_tracker,
+                        confidence_level=confidence,
+                        amount_difference=difference
+                    )
+                    logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL (CBL: Rs{cbl_amount:.2f})")
+                
+                cbl_df.at[cbl_idx, 'group_id'] = group_id
+                cbl_df.at[cbl_idx, 'corporate_root'] = roots_display
         
         logger.info(f"\n✓ Phase 1 Complete: {len(phase1_matched_cbl)} CBL records matched by corporate root")
     else:
