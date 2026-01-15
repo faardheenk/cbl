@@ -557,6 +557,7 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     Allows matching when:
     - High overlap: "ACME LTD" vs "ACME HOLDINGS LTD" → MATCH (100% overlap)
     - Multiple common words: "ABC XYZ LTD" vs "ABC XYZ HOLDINGS" → MATCH
+    - Typo tolerance: "BLU CONSTRUCTION" vs "BLU CONSTRUCTON" → MATCH (fuzzy word match)
     
     Args:
         name1: First company name
@@ -598,8 +599,32 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
     words1_list = [w for w in name1_cleaned.split() if w and w not in EXCLUDE_WORDS]
     words2_list = [w for w in name2_cleaned.split() if w and w not in EXCLUDE_WORDS]
     
-    # Find common meaningful words
+    # Find common meaningful words (exact matches)
     common_words = words1 & words2
+    
+    # FUZZY WORD MATCHING: Find additional matches for typos
+    # e.g., "CONSTRUCTION" vs "CONSTRUCTON" (1 char difference)
+    # Only check words that didn't match exactly
+    unmatched_words1 = words1 - common_words
+    unmatched_words2 = words2 - common_words
+    
+    fuzzy_matched_words = set()
+    FUZZY_WORD_THRESHOLD = 85  # 85% similarity for individual words
+    
+    for w1 in unmatched_words1:
+        for w2 in unmatched_words2:
+            # Only fuzzy match words of similar length (avoid "A" matching "APPLE")
+            if abs(len(w1) - len(w2)) <= 2 and len(w1) >= 4 and len(w2) >= 4:
+                # Use simple ratio for individual words (faster than token_set)
+                similarity = fuzz.ratio(w1, w2)
+                if similarity >= FUZZY_WORD_THRESHOLD:
+                    # Add the word from name1 to common words (arbitrary choice)
+                    fuzzy_matched_words.add(w1)
+                    logger.debug(f"Fuzzy word match: '{w1}' ≈ '{w2}' ({similarity}%)")
+                    break  # Each word only matches once
+    
+    # Combine exact and fuzzy matches
+    common_words = common_words | fuzzy_matched_words
     
     # CRITICAL CHECK: First distinctive word (primary identifier) must match
     # This prevents "SHA TRAVEL TOURS" from matching "TAJ TRAVEL TOURS"
@@ -608,9 +633,12 @@ def _has_sufficient_word_overlap(name1, name2, min_common_words=2):
         first_word_1 = words1_list[0]
         first_word_2 = words2_list[0]
         
-        # If first words are different and both are substantive (3+ chars), reject
+        # If first words are different and both are substantive (3+ chars), check fuzzy
         if first_word_1 != first_word_2 and len(first_word_1) >= 3 and len(first_word_2) >= 3:
-            return False, len(common_words), common_words
+            # Allow if first words are very similar (typo tolerance)
+            first_word_similarity = fuzz.ratio(first_word_1, first_word_2)
+            if first_word_similarity < FUZZY_WORD_THRESHOLD:
+                return False, len(common_words), common_words
     
     # Check if one name is a proper subset of the other
     # e.g., "SUN" (subset) vs "SUN MARINE" (superset)
@@ -2352,6 +2380,9 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=85, global_tracker=
     # ========== PHASE 2: FUZZY CLUSTERING FALLBACK ==========
     logger.info("\n=== Phase 2: Fuzzy Clustering Fallback (for remaining records) ===")
     
+    # Track which CBL indices were matched in Phase 2
+    phase2_matched_cbl = set()
+    
     # Get CBL records that weren't matched in Phase 1
     remaining_cbl = unmatched_cbl[~unmatched_cbl.index.isin(phase1_matched_cbl)].copy()
     logger.info(f"Processing {len(remaining_cbl)} remaining CBL records with fuzzy clustering")
@@ -2435,6 +2466,7 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=85, global_tracker=
                         # Apply matches
                         for cbl_idx in cbl_indices:
                             add_pass(cbl_df, cbl_idx, 3)
+                            phase2_matched_cbl.add(cbl_idx)  # Track Phase 2 matches
                             
                             total_insurer_amount = available_insurer.loc[insurer_indices, "ProcessedAmount_Clean_INSURER"].sum()
                             cbl_amount = cbl_df.at[cbl_idx, "ProcessedAmount_Clean"]
@@ -2462,16 +2494,122 @@ def pass3(cbl_df, insurer_df, tolerance=100, fuzzy_threshold=85, global_tracker=
                             
                             cbl_df.at[cbl_idx, 'group_id'] = group_id
             
-            logger.info(f"\n✓ Phase 2 Complete: Fuzzy clustering processed remaining records")
+            logger.info(f"\n✓ Phase 2 Complete: {len(phase2_matched_cbl)} records matched via fuzzy clustering")
         else:
             logger.info("No fuzzy clusters created")
     else:
         logger.info("No remaining records for fuzzy clustering")
     
-    # ========== PHASE 3: MERGE GROUPS WITH OVERLAPPING INSURER INDICES ==========
+    # ========== PHASE 3: SECONDARY ROOT LOOSE CAPTURE ==========
+    logger.info("\n=== Phase 3: Secondary Root Loose Capture ===")
+    logger.info("Purpose: Match remaining CBL rows using secondary roots from compound names (&/OR entities)")
+    
+    # Track Phase 3 matches
+    phase3_matched_cbl = set()
+    phase3_matches = 0
+    
+    # Get CBL records still unmatched after Phase 1 & 2
+    already_matched = phase1_matched_cbl | phase2_matched_cbl
+    remaining_for_phase3 = unmatched_cbl[~unmatched_cbl.index.isin(already_matched)].copy()
+    
+    logger.info(f"Processing {len(remaining_for_phase3)} remaining unmatched CBL records")
+    
+    if not remaining_for_phase3.empty and cbl_root_index and insurer_root_index:
+        # For each remaining unmatched CBL row
+        for cbl_idx in remaining_for_phase3.index:
+            cbl_name = remaining_for_phase3.at[cbl_idx, 'ClientName']
+            
+            # Get ALL roots for this CBL (including secondary roots from &/OR entities)
+            all_roots = _extract_all_corporate_roots(cbl_name)
+            primary_root = cbl_primary_root_map.get(cbl_idx, "")
+            
+            # Get secondary roots (exclude primary - already tried in Phase 1)
+            secondary_roots = [r for r in all_roots if r != primary_root]
+            
+            if not secondary_roots:
+                continue  # No secondary roots to try
+            
+            logger.debug(f"CBL {cbl_idx}: Primary='{primary_root}', trying {len(secondary_roots)} secondary roots")
+            
+            # Try each secondary root
+            matched_via_secondary = False
+            for sec_root in secondary_roots:
+                if sec_root not in insurer_root_index:
+                    continue  # This secondary root doesn't match any insurer
+                
+                insurer_indices = insurer_root_index[sec_root]
+                
+                # Validate insurer availability
+                can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(
+                    insurer_indices, allow_sharing=True
+                )
+                
+                if not available_indices:
+                    logger.debug(f"  Secondary root '{sec_root}': No available insurer indices")
+                    continue
+                
+                # Found a match via secondary root!
+                insurer_indices = available_indices
+                
+                # Calculate amounts
+                cbl_amount = cbl_df.at[cbl_idx, 'ProcessedAmount_Clean']
+                insurer_total = available_insurer.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+                difference = abs(cbl_amount + insurer_total)
+                
+                # Classify match - secondary root matches are always PARTIAL (lower confidence)
+                match_type, _, confidence = classify_amount_match(cbl_amount, insurer_total, tolerance)
+                
+                # For secondary root matches, cap confidence at MEDIUM
+                if confidence == "High":
+                    confidence = "Medium"
+                
+                group_counter += 1
+                group_id = f"NAME_GROUP_{group_counter}_SECONDARY"
+                
+                logger.info(f"\n🔗 Secondary Root Match Found:")
+                logger.info(f"  CBL {cbl_idx}: '{cbl_name[:60]}...'")
+                logger.info(f"  Primary Root: '{primary_root}' (no insurer match)")
+                logger.info(f"  Secondary Root: '{sec_root}' → MATCHED!")
+                logger.info(f"  Insurer Records: {len(insurer_indices)}")
+                logger.info(f"  CBL Amount: Rs{cbl_amount:.2f}")
+                logger.info(f"  Insurer Total: Rs{insurer_total:.2f}")
+                logger.info(f"  Difference: Rs{difference:.2f}")
+                logger.info(f"  Classification: PARTIAL ({confidence} Confidence - Secondary Root)")
+                
+                # Apply partial match (secondary root matches are always partial for safety)
+                add_pass(cbl_df, cbl_idx, 3)
+                
+                match_reason = f"Secondary Root: '{sec_root}' (loose capture, Primary: '{primary_root}', Diff: Rs{difference:.2f})"
+                
+                partial_matches += _apply_partial_match(
+                    cbl_df, cbl_idx, match_reason, insurer_indices,
+                    insurer_total, 3, global_tracker,
+                    confidence_level=confidence,
+                    amount_difference=difference
+                )
+                
+                cbl_df.at[cbl_idx, 'group_id'] = group_id
+                cbl_df.at[cbl_idx, 'corporate_root'] = f"{primary_root} → {sec_root} (secondary)"
+                
+                phase3_matched_cbl.add(cbl_idx)
+                phase3_matches += 1
+                matched_via_secondary = True
+                
+                logger.info(f"  ✓ CBL {cbl_idx}: PARTIAL via secondary root")
+                break  # Only match once per CBL row
+            
+            if not matched_via_secondary:
+                logger.debug(f"CBL {cbl_idx}: No secondary root matched any insurer")
+        
+        logger.info(f"\n✓ Phase 3 Complete: {phase3_matches} matches via secondary roots")
+    else:
+        logger.info("No remaining records for secondary root matching")
+    
+    # ========== PHASE 4: MERGE GROUPS WITH OVERLAPPING INSURER INDICES ==========
     cbl_df = _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker)
     
     logger.info(f"\n✓ Pass 3 Complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} name groups")
-    logger.info(f"   Phase 1 (Corporate Root): Matched {len(phase1_matched_cbl)} records")
-    logger.info(f"   Phase 2 (Fuzzy Clustering): Matched remaining records")
+    logger.info(f"   Phase 1 (Corporate Root - Primary): Matched {len(phase1_matched_cbl)} records")
+    logger.info(f"   Phase 2 (Fuzzy Clustering): Matched {len(phase2_matched_cbl)} records")
+    logger.info(f"   Phase 3 (Secondary Root - Loose): Matched {len(phase3_matched_cbl)} records")
     return cbl_df
