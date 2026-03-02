@@ -3,7 +3,11 @@
 import os
 import json
 from office365.sharepoint.client_context import ClientContext
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ModuleNotFoundError:
+    load_dotenv = None  # not available (e.g. in PyInstaller bundle); use env vars or defaults
 import logging
 import re
 import pandas as pd
@@ -47,13 +51,13 @@ class SharePointService:
         # self.tenant= "citybrokersltdmu.onmicrosoft.com"
         # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
 
-        self.cert_credentials = { 
-            'tenant': self.tenant,
-            'client_id': self.client_id,
-            'thumbprint': self.cert_thumbprint,
-            'cert_path': self.cert_path
-        }
-        self.ctx = None
+        # self.cert_credentials = { 
+        #     'tenant': self.tenant,
+        #     'client_id': self.client_id,
+        #     'thumbprint': self.cert_thumbprint,
+        #     'cert_path': self.cert_path
+        # }
+        # self.ctx = None
         
         # Initialize audit logger
         self.audit_logger = SharePointAuditLogger(self, audit_list_name="Audit Log")

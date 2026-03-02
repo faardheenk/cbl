@@ -232,14 +232,17 @@ def matrix_pass(cbl_df, insurer_df, matrix_keys, global_tracker=None):
                     # Get the original row index from the DataFrame
                     cbl_row_index = cbl_df[cbl_df['MatrixKey'] == lhs_key].index[0]
                     
-                    # Calculate matched amount total
+                    # Calculate matched amount total and amount difference
                     matched_amount_total = sum(insurer_df.loc[all_insurer_indices, "Amount_Clean_INSURER"])
+                    cbl_amount = cbl_df.at[cbl_row_index, "ProcessedAmount_Clean"] if "ProcessedAmount_Clean" in cbl_df.columns else cbl_df.at[cbl_row_index, "Amount_Clean"]
+                    amount_difference = abs(cbl_amount + matched_amount_total) if pd.notna(cbl_amount) and pd.notna(matched_amount_total) else None
                     
                     # Apply match to CBL DataFrame
                     cbl_df.at[cbl_row_index, "match_status"] = "Exact Match"
                     cbl_df.at[cbl_row_index, "match_reason"] = "Matrix Key Match"
                     cbl_df.at[cbl_row_index, "matched_insurer_indices"] = all_insurer_indices
                     cbl_df.at[cbl_row_index, "matched_amtdue_total"] = matched_amount_total
+                    cbl_df.at[cbl_row_index, "Amount Difference"] = round(amount_difference, 2) if amount_difference is not None else None
                     cbl_df.at[cbl_row_index, "match_resolved_in_pass"] = "matrix"
                     
                     # Register the match in global tracker
@@ -255,6 +258,7 @@ def matrix_pass(cbl_df, insurer_df, matrix_keys, global_tracker=None):
                             cbl_df.at[cbl_row_index, "match_reason"] = "Matrix match failed - conflicts"
                             cbl_df.at[cbl_row_index, "matched_insurer_indices"] = []
                             cbl_df.at[cbl_row_index, "matched_amtdue_total"] = None
+                            cbl_df.at[cbl_row_index, "Amount Difference"] = None
                             continue
                         else:
                             print(f"✅ Matrix match registered in global tracker")

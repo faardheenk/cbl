@@ -5,14 +5,17 @@ import logging
 import os
 from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
-from .matching_engine import pass1, pass2, pass3, GlobalMatchTracker
+from .matching_engine import GlobalMatchTracker
+from .pass1 import pass1
+from .pass2 import pass2
+from .pass3 import pass3
 from .output_handler import explode_and_merge
 import io
 
 logger = logging.getLogger(__name__)
 
 
-def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=100):
+def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50):
     """
     Run the matching process between CBL and insurer files.
     

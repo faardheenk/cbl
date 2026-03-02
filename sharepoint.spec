@@ -1,8 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+# Use CWD when run by PyInstaller (no __file__); otherwise use script directory
+_spec_dir = os.getcwd()
 
 a = Analysis(
-    ['sharepoint.py'],
-    pathex=[],
+    ['sharepoint_dynamic.py'],
+    pathex=[_spec_dir],
     binaries=[],
     datas=[],
     hiddenimports=[
@@ -13,6 +16,8 @@ a = Analysis(
         'office365.runtime.auth.client_credential',
         'office365.runtime.auth.certificate_credential',
         'dotenv',
+        'dotenv.main',
+        'dotenv.parser',
         'pandas',
         'openpyxl',
         'fuzzywuzzy',
@@ -28,7 +33,18 @@ a = Analysis(
         'os',
         'itertools',
         'argparse',
-        'sys'
+        'sys',
+        'matrix',
+        'sharepoint_audit_logger',
+        'matching',
+        'matching.orchestrator',
+        'matching.data_processing',
+        'matching.matching_engine',
+        'matching.pass1',
+        'matching.pass2',
+        'matching.pass3',
+        'matching.output_handler',
+        'matching.utils',
     ],
     hookspath=[],
     hooksconfig={},
@@ -45,7 +61,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='sharepoint',
+    name='FRCIStatementRecon',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -31,7 +31,7 @@ def _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols, preserve_ma
     else:
         # Clear CBL data but preserve match info if requested
         for col in cbl_cols:
-            if preserve_match_info and col in ['match_status', 'match_reason', 'matched_insurer_indices', 'matched_amtdue_total', 'partial_candidates_indices']:
+            if preserve_match_info and col in ['match_status', 'match_reason', 'matched_insurer_indices', 'matched_amtdue_total', 'Amount Difference', 'partial_candidates_indices']:
                 continue  # Keep match info
             new_row[col] = None
     

@@ -814,6 +814,7 @@ def initialize_tracking(cbl_df):
     cbl_df["match_reason"] = ""
     cbl_df["matched_insurer_indices"] = [[] for _ in range(len(cbl_df))]
     cbl_df["matched_amtdue_total"] = None
+    cbl_df["Amount Difference"] = None
     cbl_df["partial_candidates_indices"] = [[] for _ in range(len(cbl_df))]
     cbl_df["match_resolved_in_pass"] = None
     cbl_df["partial_resolved_in_pass"] = None
