@@ -129,33 +129,22 @@ def main():
         }
     }
 
-    # Correct matrix keys format - list of dictionaries with 'matrixKey' field
-    matrix_keys = []  # Empty for now, will be populated by the system if needed
-    
-    # Alternative: you can specify specific matrix keys like this:
-    # matrix_keys = [
-    #     {'matrixKey': 'KEY1|KEY1'},
-    #     {'matrixKey': 'KEY2|KEY2'}
-    # ]
-    
     logger.info(f"⚙️ Column mappings configured")
-    logger.info(f"⚙️ Matrix keys: {len(matrix_keys)} keys configured")
-    
+
     try:
         start_time = datetime.now()
         logger.info(f"🚀 Starting matching process at {start_time.strftime('%H:%M:%S')}")
-        
+
         # Read files as bytes for the matching process
         logger.info("📖 Reading files as bytes for matching process...")
         with open(cbl_file, 'rb') as f:
             cbl_file_content = f.read()
         with open(insurer_file, 'rb') as f:
             insurer_file_content = f.read()
-        
-        # Run the enhanced matching process
+
+        # Run the matching process
         results = run_matching_process(
             column_mappings=column_mappings,
-            matrix_keys=matrix_keys,
             cbl_file=cbl_file_content,
             insurer_file=insurer_file_content,
             output_file=output_file,
@@ -297,7 +286,6 @@ def run_with_custom_files(cbl_file, insurer_file, output_file=None):
     
     return run_matching_process(
         column_mappings=column_mappings,
-        matrix_keys=[],  # Empty matrix keys
         cbl_file=cbl_file,
         insurer_file=insurer_file,
         output_file=output_file,

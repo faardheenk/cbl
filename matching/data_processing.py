@@ -3,7 +3,6 @@
 import pandas as pd
 import logging
 import re
-from matrix import build_key
 import io
 
 logger = logging.getLogger(__name__)
@@ -511,16 +510,15 @@ def create_dynamic_column_mappings(cbl_columns, insurer_columns, custom_mappings
 
 
 
-def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
+def preprocess(cbl_df, insurer_df, column_mappings):
     """
     Preprocess and clean the CBL and insurer dataframes.
-    
+
     Args:
         cbl_df: CBL dataframe
-        insurer_df: Insurer dataframe  
+        insurer_df: Insurer dataframe
         column_mappings: Dictionary containing column mappings (already filtered by create_dynamic_column_mappings)
-        matrix_key_columns: Optional dictionary specifying columns to use for matrix keys
-        
+
     Returns:
         tuple: (processed_cbl_df, processed_insurer_df)
     """
@@ -774,35 +772,7 @@ def preprocess(cbl_df, insurer_df, column_mappings, matrix_key_columns=None):
         insurer_df["PolicyNo_2_Clean_INSURER"] = ""
         logger.info("PolicyNo_2_INSURER column not found - creating empty column for compatibility")
 
-    # Matrix Key - build dynamically based on available columns
-    default_cbl_cols = ['PlacingNo', 'PolicyNo', 'ClientName', 'ProcessedAmount']
-    default_insurer_cols = ['PlacingNo_INSURER', 'PolicyNo_1_INSURER', 'ClientName_INSURER', 'ProcessedAmount_INSURER']
-
-    if matrix_key_columns:
-        default_cbl_cols = matrix_key_columns.get('cbl_columns', default_cbl_cols)
-        default_insurer_cols = matrix_key_columns.get('insurer_columns', default_insurer_cols)
-    
-    # Use only columns that exist in the dataframes
-    available_cbl_cols = [col for col in default_cbl_cols if col in cbl_df.columns]
-    available_insurer_cols = [col for col in default_insurer_cols if col in insurer_df.columns]
-    
-    # Build matrix keys
-    cbl_df["MatrixKey"] = ""
-    insurer_df["MatrixKey_INSURER"] = ""
-
-    if available_cbl_cols:
-        cbl_df["MatrixKey"] = cbl_df.apply(lambda row: build_key(row, available_cbl_cols), axis=1)
-        logger.info(f"Built CBL MatrixKey using columns: {available_cbl_cols}")
-    else:
-        logger.warning("No standard columns available for CBL MatrixKey - using empty string")
-    
-    if available_insurer_cols:
-        insurer_df["MatrixKey_INSURER"] = insurer_df.apply(lambda row: build_key(row, available_insurer_cols), axis=1)
-        logger.info(f"Built insurer MatrixKey using columns: {available_insurer_cols}")
-    else:
-        logger.warning("No standard columns available for insurer MatrixKey - using empty string")
-
-    logger.info(f"✓ Preprocessing complete: {len(cbl_df)} CBL records, {len(insurer_df)} insurer records")
+    logger.info(f"Preprocessing complete: {len(cbl_df)} CBL records, {len(insurer_df)} insurer records")
     return cbl_df, insurer_df
 
 

@@ -33,7 +33,8 @@ class SharePointService:
     def __init__(self):
         """Initialize SharePoint service with credentials from environment variables."""
         # Load environment variables
-        load_dotenv(override=True)
+        if load_dotenv:
+            load_dotenv(override=True)
         
         # Get SharePoint configuration from environment variables
         # self.site_url = os.getenv('SITE_URL')
@@ -51,13 +52,13 @@ class SharePointService:
         # self.tenant= "citybrokersltdmu.onmicrosoft.com"
         # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
 
-        # self.cert_credentials = { 
-        #     'tenant': self.tenant,
-        #     'client_id': self.client_id,
-        #     'thumbprint': self.cert_thumbprint,
-        #     'cert_path': self.cert_path
-        # }
-        # self.ctx = None
+        self.cert_credentials = {
+            "tenant": self.tenant,
+            "client_id": self.client_id,
+            "thumbprint": self.cert_thumbprint,
+            "cert_path": self.cert_path,
+        }
+        self.ctx = None
         
         # Initialize audit logger
         self.audit_logger = SharePointAuditLogger(self, audit_list_name="Audit Log")
@@ -216,6 +217,58 @@ class SharePointService:
                 logger.error(f"❌ Even fallback failed: {str(fallback_error)}")
                 raise
 
+
+    def get_history_file(self, insurer_name):
+        """
+        Download history.xlsx for an insurer from the Matrix library.
+        Path: Matrix/{INSURER_NAME}/history.xlsx
+
+        Args:
+            insurer_name: Insurer folder name (e.g. "ALLIANZ")
+
+        Returns:
+            bytes or None: File content as bytes, or None if not found.
+        """
+        try:
+            ctx = self.get_client_context()
+            library = ctx.web.lists.get_by_title("Matrix")
+            root_folder = library.root_folder
+            ctx.load(root_folder)
+            ctx.execute_query()
+
+            # First, list files in the insurer folder to debug
+            insurer_folder_url = f"{root_folder.serverRelativeUrl}/{insurer_name}"
+            logger.info(f"[HISTORY] Looking in folder: {insurer_folder_url}")
+            try:
+                insurer_folder = ctx.web.get_folder_by_server_relative_url(insurer_folder_url)
+                files = insurer_folder.files
+                ctx.load(files)
+                ctx.execute_query()
+                file_names = [f.name for f in files]
+                logger.info(f"[HISTORY] Files in Matrix/{insurer_name}/: {file_names}")
+            except Exception as list_err:
+                logger.error(f"[HISTORY] Could not list folder Matrix/{insurer_name}/: {type(list_err).__name__}: {list_err}")
+
+            # Download history.xlsx from the folder files we already loaded
+            for f in files:
+                if f.name.lower() == "history.xlsx":
+                    logger.info(f"[HISTORY] Found history.xlsx — downloading...")
+                    file_content = f.read()
+                    ctx.execute_query()
+
+                    if hasattr(file_content, 'value'):
+                        file_content = file_content.value
+
+                    logger.info(f"[HISTORY] history.xlsx downloaded — type={type(file_content).__name__}")
+                    return file_content
+
+            logger.info(f"[HISTORY] history.xlsx not found in file listing for {insurer_name}")
+            return None
+        except Exception as e:
+            import traceback
+            logger.error(f"[HISTORY] Failed to download history.xlsx for {insurer_name}: {type(e).__name__}: {e}")
+            logger.error(f"[HISTORY] Traceback: {traceback.format_exc()}")
+            return None
 
     def get_matrix(self, insurer_name=None):
         try:
@@ -639,29 +692,25 @@ def main():
                         insurer_name=folder['parent_folder']
                     )
                     
-                    # Create matrix keys based on available columns
-                    available_cbl_std = list(column_mappings['cbl_mappings'].values())
-                    available_insurer_std = [col + '_INSURER' for col in column_mappings['insurer_mappings'].values()]
-                    
-                    matrix_keys = {
-                        'enabled': True,
-                        'cbl_columns': available_cbl_std,
-                        'insurer_columns': available_insurer_std
-                    }
-                    
-                    logger.info(f"🔧 Generated matrix keys:")
-                    logger.info(f"   CBL columns: {matrix_keys['cbl_columns']}")
-                    logger.info(f"   Insurer columns: {matrix_keys['insurer_columns']}")
-                    
-                    # Run matching process with dynamic configuration
-                    logger.info(f"🚀 Running matching process with dynamic configuration...")
+                    # Download match history for this insurer (if it exists)
+                    insurer_name = folder['parent_folder']
+                    logger.info(f"[HISTORY] Attempting to download history.xlsx for insurer: '{insurer_name}'")
+                    logger.info(f"[HISTORY] Expected SharePoint path: Matrix/{insurer_name}/history.xlsx")
+                    history_content = sharepoint_service.get_history_file(insurer_name)
+                    if history_content is not None:
+                        logger.info(f"[HISTORY] SUCCESS — history.xlsx fetched, type={type(history_content).__name__}")
+                    else:
+                        logger.info(f"[HISTORY] FAILED — history.xlsx not found for '{insurer_name}'")
+
+                    # Run matching process
+                    logger.info(f"Running matching process...")
                     try:
                         result = run_matching_process(
-                            column_mappings=column_mappings,  # 🆕 DYNAMIC MAPPINGS
-                            matrix_keys=matrix_keys,          # 🆕 DYNAMIC MATRIX KEYS
-                            cbl_file=cbl_file_content,        # 🆕 FILE CONTENT FROM MEMORY
-                            insurer_file=insurer_file_content, # 🆕 FILE CONTENT FROM MEMORY
-                            output_file="output.xlsx"
+                            column_mappings=column_mappings,
+                            cbl_file=cbl_file_content,
+                            insurer_file=insurer_file_content,
+                            output_file="output.xlsx",
+                            history_file=history_content,
                         )
                         
                         # Upload the result to SharePoint

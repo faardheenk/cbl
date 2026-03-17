@@ -3,9 +3,9 @@ import pandas as pd
 import argparse
 import logging
 import os
-from matrix import matrix_pass
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import GlobalMatchTracker
+from .match_history import apply_match_history, finalize_history_no_match, generate_fingerprints_for_df
 from .pass1 import pass1
 from .pass2 import pass2
 from .pass3 import pass3
@@ -15,23 +15,24 @@ import io
 logger = logging.getLogger(__name__)
 
 
-def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50):
+def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50, history_file=None):
     """
     Run the matching process between CBL and insurer files.
-    
+
     Args:
         column_mappings: Dictionary containing column mappings for CBL and insurer data
-        matrix_keys: Dictionary containing matrix key configurations
         cbl_file (bytes, optional): CBL Excel file content as bytes. If None, will be prompted.
         insurer_file (bytes, optional): Insurer Excel file content as bytes. If None, will be prompted.
         output_file (str, optional): Output Excel file name. Defaults to 'output.xlsx'.
         tolerance (int, optional): Tolerance for amount matching. Defaults to 100.
-        
+        history_file (str or bytes, optional): Path to history.xlsx or its content as bytes.
+            If provided, rows matching previous manual moves are pre-placed before passes.
+
     Returns:
         dict: Results dictionary containing match statistics and output file content as bytes
     """
     logger.info("\n=== Starting Matching Process ===")
-    
+
     if cbl_file is None or insurer_file is None:
         parser = argparse.ArgumentParser(description='Match data between two Excel files.')
         parser.add_argument('cbl_file', help='Path to the CBL Excel file')
@@ -44,114 +45,111 @@ def run_matching_process(column_mappings, matrix_keys, cbl_file=None, insurer_fi
 
     try:
         logger.info(f"Reading files: {cbl_file} and {insurer_file}")
-        
+
         # Read Excel files with intelligent header detection and column filtering
-        logger.info("🔍 Using smart header detection for Excel files...")
+        logger.info("Using smart header detection for Excel files...")
         cbl_df = read_excel_with_smart_headers(cbl_file, usecols=lambda x: not str(x).startswith('Unnamed:'))
         insurer_df = read_excel_with_smart_headers(insurer_file, usecols=lambda x: not str(x).startswith('Unnamed:'))
-        
-        logger.info(f"DEBUG: After column filtering - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
+
+        logger.info(f"After column filtering - CBL rows: {len(cbl_df)}, Insurer rows: {len(insurer_df)}")
 
         # Generate output in memory (no local file saving)
         output_filename = output_file
 
         # Process the data
-        clean_cbl, clean_insurer = preprocess(cbl_df, insurer_df, column_mappings, matrix_keys)
+        clean_cbl, clean_insurer = preprocess(cbl_df, insurer_df, column_mappings)
         clean_cbl = initialize_tracking(clean_cbl)
-        
-        logger.info(f"DEBUG: After preprocessing - CBL rows: {len(clean_cbl)}, Insurer rows: {len(clean_insurer)}")
+
+        logger.info(f"After preprocessing - CBL rows: {len(clean_cbl)}, Insurer rows: {len(clean_insurer)}")
+
+        # ── Generate Canonical Fingerprints ───────────────────────────────
+        # These fingerprints are the single source of truth for match history.
+        # They are generated from preprocessed data and written to output.xlsx
+        # so the frontend can read them directly instead of regenerating.
+        clean_cbl["_fingerprint"] = generate_fingerprints_for_df(clean_cbl)
+
+        # For insurer, strip _INSURER suffix before fingerprinting (same as backend replay)
+        insurer_cols_stripped = {
+            col: col[:-len("_INSURER")] if col.endswith("_INSURER") else col
+            for col in clean_insurer.columns
+        }
+        fp_insurer_source = clean_insurer.rename(columns=insurer_cols_stripped)
+        clean_insurer["_fingerprint_INSURER"] = generate_fingerprints_for_df(fp_insurer_source)
+
+        logger.info(f"Generated canonical fingerprints: {len(clean_cbl)} CBL, {len(clean_insurer)} insurer")
 
         # Initialize comprehensive global match tracker for consistent behavior across all passes
         global_tracker = GlobalMatchTracker()
-        logger.info("🔧 Initialized GlobalMatchTracker for comprehensive CBL-insurer match tracking")
-        
-        # Run matrix pass with global tracker integration
-        clean_cbl, clean_insurer, matched_insurer_indices = matrix_pass(clean_cbl, clean_insurer, matrix_keys, global_tracker)
-        
-        # Log matrix pass results (global tracker is already updated by matrix_pass)
-        if matched_insurer_indices:
-            logger.info(f"🎯 Matrix pass matched {len(matched_insurer_indices)} insurer rows with full global tracking")
-        else:
-            logger.info("🎯 Matrix pass completed - no matches found")
 
-        # Run additional passes only on unmatched records
-        if len(matched_insurer_indices) < len(clean_insurer):
-            logger.info(f"🚀 Running additional passes with global tracking")
-            
-            # Helper function to check if required keys exist in column mappings
-            def has_required_keys(cbl_required, insurer_required):
-                cbl_mappings = column_mappings.get('cbl_mappings', {})
-                insurer_mappings = column_mappings.get('insurer_mappings', {})
-                
-                # Check if all required CBL keys are mapped
-                cbl_has_keys = all(any(target == key for target in cbl_mappings.values()) for key in cbl_required)
-                
-                # Check if all required insurer keys are mapped
-                insurer_has_keys = all(any(target == key for target in insurer_mappings.values()) for key in insurer_required)
-                
-                return cbl_has_keys and insurer_has_keys
-            
-            # Pass 1: Requires PlacingNo and ProcessedAmount
-            if has_required_keys(['PlacingNo', 'ProcessedAmount'], ['PlacingNo', 'ProcessedAmount']):
-                logger.info("✓ Pass 1: Required keys found in mappings - running Pass 1 with global tracking")
-                clean_cbl = pass1(clean_cbl, clean_insurer, tolerance, global_tracker)
-            else:
-                logger.info("⚠ Pass 1: Required keys (PlacingNo, ProcessedAmount) not found in mappings - skipping Pass 1")
-            
-            # Log global tracker status after Pass 1
-            if global_tracker:
-                logger.info(f"📊 After Pass 1: {global_tracker.get_usage_summary()}")
-            
-            # Pass 2: Temporarily disabled to allow more records to reach Pass 3 name clustering
-            logger.info("⚠️ Pass 2: Temporarily disabled - all unmatched records will proceed to Pass 3")
-            # Pass 2: Requires PolicyNo and ProcessedAmount (CBL) + ProcessedAmount and at least one PolicyNo (Insurer)
-            cbl_has_pass2 = has_required_keys(['PolicyNo', 'ProcessedAmount'], [])
-            insurer_has_pass2_base = has_required_keys([], ['ProcessedAmount'])
-            
-            # Check if insurer has at least one policy number column mapped
-            insurer_mappings = column_mappings.get('insurer_mappings', {})
-            has_policy1 = any(target == 'PolicyNo_1' for target in insurer_mappings.values())
-            has_policy2 = any(target == 'PolicyNo_2' for target in insurer_mappings.values()) 
-            insurer_has_policy = has_policy1 or has_policy2
-            
-            if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
-                logger.info("✓ Pass 2: Required keys found in mappings - running Pass 2 with global tracking")
-                clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, global_tracker)
-            else:
-                missing_keys = []
-                if not cbl_has_pass2:
-                    missing_keys.append("CBL: PolicyNo, ProcessedAmount")
-                if not insurer_has_pass2_base:
-                    missing_keys.append("Insurer: ProcessedAmount")
-                if not insurer_has_policy:
-                    missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
-                logger.info(f"⚠ Pass 2: Required keys not found in mappings - skipping Pass 2. Missing: {'; '.join(missing_keys)}")
-            
-            # Log global tracker status after Pass 2
-            if global_tracker:
-                logger.info(f"📊 After Pass 2: {global_tracker.get_usage_summary()}")
-            
-            # Pass 3: Intelligent Name Matching (Corporate Root + Fuzzy Clustering)
-            # This pass combines two strategies:
-            #   Phase 1: Exact corporate root matching (fast, precise)
-            #   Phase 2: Fuzzy clustering fallback (catches typos/variations)
-            # Requires ClientName and ProcessedAmount
-            if has_required_keys(['ClientName', 'ProcessedAmount'], ['ClientName', 'ProcessedAmount']):
-                logger.info("✓ Pass 3: Required keys found in mappings - running Intelligent Name Matching with global tracking")
-                # Using 95% threshold for fuzzy clustering (Phase 2) - stricter to prevent over-clustering
-                clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
-            else:
-                logger.info("⚠ Pass 3: Required keys (ClientName, ProcessedAmount) not found in mappings - skipping Pass 3")
-            
-            # Log final global tracker status after Pass 3
-            # Note: Pass 3 now includes corporate root matching (formerly Pass 4) in Phase 1
-            if global_tracker:
-                final_summary = global_tracker.get_usage_summary()
-                logger.info(f"🎯 Final Global Tracker Summary: {final_summary}")
-                logger.info(f"✅ Total unique insurer rows used: {final_summary['total_unique_insurer_used']}/{len(clean_insurer)} ({final_summary['total_unique_insurer_used']/len(clean_insurer)*100:.1f}%)")
-                
+        # ── Match History Layer ──────────────────────────────────────────
+        # Pre-place rows based on previous manual user moves (before any passes).
+        # Rows that match history fingerprints are placed directly into their
+        # target buckets; the remaining rows proceed through normal comparison.
+        if history_file is not None:
+            logger.info(f"[HISTORY] History file provided — running match history layer")
+            clean_cbl, clean_insurer, history_summary = apply_match_history(
+                clean_cbl, clean_insurer, history_file, global_tracker
+            )
+            logger.info(f"[HISTORY] After History Layer: {global_tracker.get_usage_summary()}")
         else:
-            print("All records matched via matrix keys - skipping additional passes")
+            logger.info("[HISTORY] No history file provided — skipping match history layer")
+
+        # ── Matching Passes ──────────────────────────────────────────────
+        # Helper function to check if required keys exist in column mappings
+        def has_required_keys(cbl_required, insurer_required):
+            cbl_mappings = column_mappings.get('cbl_mappings', {})
+            insurer_mappings = column_mappings.get('insurer_mappings', {})
+            cbl_has_keys = all(any(target == key for target in cbl_mappings.values()) for key in cbl_required)
+            insurer_has_keys = all(any(target == key for target in insurer_mappings.values()) for key in insurer_required)
+            return cbl_has_keys and insurer_has_keys
+
+        # Pass 1: Placing Number + Amount
+        if has_required_keys(['PlacingNo', 'ProcessedAmount'], ['PlacingNo', 'ProcessedAmount']):
+            logger.info("Pass 1: Running Placing Number + Amount matching")
+            clean_cbl = pass1(clean_cbl, clean_insurer, tolerance, global_tracker)
+        else:
+            logger.info("Pass 1: Skipped — required keys (PlacingNo, ProcessedAmount) not in mappings")
+        logger.info(f"After Pass 1: {global_tracker.get_usage_summary()}")
+
+        # Pass 2: Policy Number + Amount (currently disabled)
+        logger.info("Pass 2: Disabled — all unmatched records proceed to Pass 3")
+        cbl_has_pass2 = has_required_keys(['PolicyNo', 'ProcessedAmount'], [])
+        insurer_has_pass2_base = has_required_keys([], ['ProcessedAmount'])
+        insurer_mappings = column_mappings.get('insurer_mappings', {})
+        has_policy1 = any(target == 'PolicyNo_1' for target in insurer_mappings.values())
+        has_policy2 = any(target == 'PolicyNo_2' for target in insurer_mappings.values())
+        insurer_has_policy = has_policy1 or has_policy2
+
+        if cbl_has_pass2 and insurer_has_pass2_base and insurer_has_policy:
+            logger.info("Pass 2: Required keys found — running Policy Number + Amount matching")
+            clean_cbl = pass2(clean_cbl, clean_insurer, tolerance, global_tracker)
+        else:
+            missing_keys = []
+            if not cbl_has_pass2:
+                missing_keys.append("CBL: PolicyNo, ProcessedAmount")
+            if not insurer_has_pass2_base:
+                missing_keys.append("Insurer: ProcessedAmount")
+            if not insurer_has_policy:
+                missing_keys.append("Insurer: PolicyNo_1 or PolicyNo_2")
+            logger.info(f"Pass 2: Skipped — missing: {'; '.join(missing_keys)}")
+        logger.info(f"After Pass 2: {global_tracker.get_usage_summary()}")
+
+        # Pass 3: Intelligent Name Matching (Corporate Root + Fuzzy Clustering)
+        if has_required_keys(['ClientName', 'ProcessedAmount'], ['ClientName', 'ProcessedAmount']):
+            logger.info("Pass 3: Running Intelligent Name Matching")
+            clean_cbl = pass3(clean_cbl, clean_insurer, tolerance, 95, global_tracker)
+        else:
+            logger.info("Pass 3: Skipped — required keys (ClientName, ProcessedAmount) not in mappings")
+
+        final_summary = global_tracker.get_usage_summary()
+        logger.info(f"Final Global Tracker: {final_summary}")
+        logger.info(f"Total unique insurer rows used: {final_summary['total_unique_insurer_used']}/{len(clean_insurer)} ({final_summary['total_unique_insurer_used']/len(clean_insurer)*100:.1f}%)")
+
+        # ── Finalize History No-Match ─────────────────────────────────
+        # Convert sentinel _History_No_Match status back to "No Match"
+        # now that all passes are done and won't touch these rows.
+        if history_file is not None:
+            clean_cbl = finalize_history_no_match(clean_cbl)
 
         # Sort by group_id to keep grouped rows together in output
         if 'group_id' in clean_cbl.columns:
@@ -268,7 +266,7 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
             logger.info(f"Found {len(should_be_no_match)} partial match rows with no insurer data - marking as No Match")
             for idx in should_be_no_match.index:
                 partial_matches.at[idx, "match_status"] = "No Match"
-                logger.info(f"Fixed row {idx}: {partial_matches.at[idx, 'MatrixKey']} - {partial_matches.at[idx, 'match_reason']}")
+                logger.info(f"Fixed row {idx}: {partial_matches.at[idx, 'match_reason']}")
             
             # Move these rows from partial_matches to no_matches
             fixed_rows = partial_matches[partial_matches["match_status"] == "No Match"].copy()
