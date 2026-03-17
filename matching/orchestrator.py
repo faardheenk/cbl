@@ -5,7 +5,7 @@ import logging
 import os
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import GlobalMatchTracker
-from .match_history import apply_match_history, finalize_history_no_match, generate_fingerprints_for_df
+from .match_history import apply_match_history, finalize_history_no_match, finalize_history_dynamic_buckets, generate_fingerprints_for_df
 from .pass1 import pass1
 from .pass2 import pass2
 from .pass3 import pass3
@@ -15,7 +15,7 @@ import io
 logger = logging.getLogger(__name__)
 
 
-def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50, history_file=None):
+def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50, history_file=None, dynamic_buckets=None):
     """
     Run the matching process between CBL and insurer files.
 
@@ -88,7 +88,7 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         if history_file is not None:
             logger.info(f"[HISTORY] History file provided — running match history layer")
             clean_cbl, clean_insurer, history_summary = apply_match_history(
-                clean_cbl, clean_insurer, history_file, global_tracker
+                clean_cbl, clean_insurer, history_file, global_tracker, dynamic_buckets
             )
             logger.info(f"[HISTORY] After History Layer: {global_tracker.get_usage_summary()}")
         else:
@@ -150,6 +150,7 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # now that all passes are done and won't touch these rows.
         if history_file is not None:
             clean_cbl = finalize_history_no_match(clean_cbl)
+            clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
 
         # Sort by group_id to keep grouped rows together in output
         if 'group_id' in clean_cbl.columns:
@@ -161,14 +162,14 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
             clean_cbl = clean_cbl.reset_index(drop=True)
 
         # Generate output and statistics
-        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename)
+        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets)
 
     except Exception as e:
         logger.error(f"\nError: {str(e)}")
         raise
 
 
-def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
+def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets=None):
     """Generate output files and calculate statistics."""
 
     # Track insurer indices by match type
@@ -216,7 +217,17 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
     exact_matches = clean_cbl[clean_cbl["match_status"] == "Exact Match"].copy()
     partial_matches = clean_cbl[clean_cbl["match_status"] == "Partial Match"].copy()
     no_matches = clean_cbl[clean_cbl["match_status"] == "No Match"].copy()
-    
+
+    # Extract dynamic bucket rows (match_status == BucketKey after finalization)
+    dynamic_bucket_dfs = {}
+    if dynamic_buckets:
+        for bucket in dynamic_buckets:
+            key = bucket["BucketKey"]
+            bucket_rows = clean_cbl[clean_cbl["match_status"] == key].copy()
+            dynamic_bucket_dfs[key] = bucket_rows
+            if not bucket_rows.empty:
+                logger.info(f"  - Dynamic bucket '{key}': {len(bucket_rows)}")
+
     logger.info(f"✓ Split complete:")
     logger.info(f"  - Exact matches: {len(exact_matches)}")
     logger.info(f"  - Partial matches: {len(partial_matches)}")
@@ -345,20 +356,38 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
         logger.info(f"✓ Sorted {len(unmatched_insurer)} No Match Insurer records by ClientName_INSURER")
 
     # Write to Excel in memory with combined sheets only
-    try: 
+    try:
         output_buffer = io.BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            # Combined sheets: CBL + Insurer data merged
+            # Fixed sheets: CBL + Insurer data merged
             exact_matches.to_excel(writer, sheet_name="Exact Matches", index=False)
             partial_matches.to_excel(writer, sheet_name="Partial Matches", index=False)
             no_matches.to_excel(writer, sheet_name="No Matches CBL", index=False)
             unmatched_insurer.to_excel(writer, sheet_name="No Matches Insurer", index=False)
-        
+
+            # Dynamic bucket sheets
+            if dynamic_buckets:
+                for bucket in dynamic_buckets:
+                    key = bucket["BucketKey"]
+                    bucket_rows = dynamic_bucket_dfs.get(key, pd.DataFrame())
+                    if not bucket_rows.empty:
+                        bucket_merged = explode_and_merge(bucket_rows, clean_insurer)
+                        bucket_merged.to_excel(writer, sheet_name=key, index=False)
+                    else:
+                        # Write empty sheet with headers so frontend knows the bucket exists
+                        pd.DataFrame(columns=exact_matches.columns).to_excel(
+                            writer, sheet_name=key, index=False
+                        )
+
+                # Metadata sheet so frontend knows which sheets are dynamic buckets
+                bucket_config_df = pd.DataFrame(dynamic_buckets)
+                bucket_config_df.to_excel(writer, sheet_name="_BucketConfig", index=False)
+
         # Get the Excel file content as bytes
         output_buffer.seek(0)
         excel_content = output_buffer.getvalue()
         output_buffer.close()
-        
+
     except Exception as e:
         logger.error(f"Error writing to Excel: {str(e)}")
         raise
@@ -437,5 +466,9 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename):
             'exact_match_amount': exact_match_insurer_amount,
             'partial_match_amount': partial_match_insurer_amount,
             'unmatched_amount': unmatched_insurer_amount
+        },
+        'dynamic_bucket_stats': {
+            bucket["BucketKey"]: len(dynamic_bucket_dfs.get(bucket["BucketKey"], pd.DataFrame()))
+            for bucket in (dynamic_buckets or [])
         }
     }

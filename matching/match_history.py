@@ -59,6 +59,10 @@ FINGERPRINT_EXCLUDE_COLUMNS = {
 # Must be renamed back to "No Match" after all passes via finalize_history_no_match().
 HISTORY_NO_MATCH_SENTINEL = "_History_No_Match"
 
+# Sentinel prefix for dynamic bucket pre-placed rows.
+# Converted back to the BucketKey after all passes via finalize_history_dynamic_buckets().
+DYNAMIC_BUCKET_SENTINEL_PREFIX = "_DynamicBucket_"
+
 
 def generate_fingerprint(row: pd.Series) -> str:
     """Generate a fingerprint for a row by concatenating all non-metadata
@@ -158,7 +162,7 @@ def read_match_history(history_source) -> list:
     return entries
 
 
-def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None):
+def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None, dynamic_buckets=None):
     """
     Apply match history to pre-place rows in their correct buckets.
 
@@ -169,6 +173,7 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None)
         insurer_df: Preprocessed insurer DataFrame (columns have _INSURER suffix).
         history_source: Path to history.xlsx (str), file content (bytes), or None.
         global_tracker: GlobalMatchTracker instance.
+        dynamic_buckets: list of {"BucketName": str, "BucketKey": str} or None.
 
     Returns:
         tuple: (cbl_df, insurer_df, summary_dict)
@@ -222,9 +227,17 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None)
     summary = {"exact": 0, "partial": 0, "no-match": 0}
     history_group_counter = 0
 
+    # Build set of valid target bucket keys (fixed + dynamic)
+    dynamic_bucket_keys = set()
+    if dynamic_buckets:
+        dynamic_bucket_keys = {b["BucketKey"] for b in dynamic_buckets}
+        for key in dynamic_bucket_keys:
+            summary[key] = 0
+    valid_targets = {"exact", "partial", "no-match"} | dynamic_bucket_keys
+
     for entry_idx, entry in enumerate(history):
         target = entry["target_bucket"]
-        if target not in ("exact", "partial", "no-match"):
+        if target not in valid_targets:
             logger.warning(f"[HISTORY] Unknown target bucket '{target}' — skipping entry #{entry_idx}")
             continue
 
@@ -271,8 +284,14 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None)
             continue
 
         # --- Apply pre-placement to the PREPROCESSED DataFrames ---
-        if target in ("exact", "partial"):
-            match_status = "Exact Match" if target == "exact" else "Partial Match"
+        if target in ("exact", "partial") or target in dynamic_bucket_keys:
+            if target == "exact":
+                match_status = "Exact Match"
+            elif target == "partial":
+                match_status = "Partial Match"
+            else:
+                # Dynamic bucket — use sentinel so passes skip these rows
+                match_status = f"{DYNAMIC_BUCKET_SENTINEL_PREFIX}{target}"
 
             # Assign group_id when multiple CBL rows share the same insurer set
             group_id = None
@@ -316,6 +335,9 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None)
     logger.info(f"[HISTORY] Exact:    {summary['exact']} CBL rows pre-placed")
     logger.info(f"[HISTORY] Partial:  {summary['partial']} CBL rows pre-placed")
     logger.info(f"[HISTORY] No Match: {summary['no-match']} CBL rows pre-placed")
+    for key in dynamic_bucket_keys:
+        if summary.get(key, 0) > 0:
+            logger.info(f"[HISTORY] {key}: {summary[key]} CBL rows pre-placed")
     logger.info(f"[HISTORY] Total:    {total} CBL rows pre-placed out of {len(cbl_df)}")
     if total == 0:
         logger.info("[HISTORY] No fingerprint matches found — all rows will go through normal comparison")
@@ -343,4 +365,26 @@ def finalize_history_no_match(cbl_df):
     if count > 0:
         cbl_df.loc[mask, "match_status"] = "No Match"
         logger.info(f"Finalized {count} history no-match rows")
+    return cbl_df
+
+
+def finalize_history_dynamic_buckets(cbl_df):
+    """
+    Convert _DynamicBucket_* sentinels back to their BucketKey values after all passes.
+
+    Must be called after all matching passes complete but before output generation.
+
+    Args:
+        cbl_df: CBL DataFrame that may contain dynamic bucket sentinel values.
+
+    Returns:
+        cbl_df: Updated DataFrame with sentinels replaced by BucketKey values.
+    """
+    mask = cbl_df["match_status"].str.startswith(DYNAMIC_BUCKET_SENTINEL_PREFIX, na=False)
+    count = mask.sum()
+    if count > 0:
+        cbl_df.loc[mask, "match_status"] = cbl_df.loc[mask, "match_status"].str.replace(
+            DYNAMIC_BUCKET_SENTINEL_PREFIX, "", n=1
+        )
+        logger.info(f"Finalized {count} history dynamic-bucket rows")
     return cbl_df

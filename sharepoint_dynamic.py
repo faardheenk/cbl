@@ -218,6 +218,41 @@ class SharePointService:
                 raise
 
 
+    def get_dynamic_buckets(self, insurer_name):
+        """
+        Fetch dynamic bucket definitions from SharePoint 'Buckets' list
+        for the given insurer.
+
+        Args:
+            insurer_name: Name of the insurer (e.g., "EAGLE INSURANCE LTD")
+
+        Returns:
+            list of {"BucketName": str, "BucketKey": str}
+        """
+        try:
+            ctx = self.get_client_context()
+            bucket_list = ctx.web.lists.get_by_title("Buckets")
+            query = f"InsuranceCompany eq '{insurer_name}'"
+            items = bucket_list.items.filter(query).select(
+                ['BucketName', 'BucketKey']
+            ).get().execute_query()
+
+            buckets = []
+            for item in items:
+                bucket_name = item.properties.get('BucketName', '')
+                bucket_key = item.properties.get('BucketKey', '')
+                if bucket_name and bucket_key:
+                    buckets.append({
+                        'BucketName': bucket_name,
+                        'BucketKey': bucket_key,
+                    })
+
+            logger.info(f"[BUCKETS] Fetched {len(buckets)} dynamic buckets for '{insurer_name}': {[b['BucketKey'] for b in buckets]}")
+            return buckets
+        except Exception as e:
+            logger.warning(f"[BUCKETS] Could not fetch dynamic buckets for '{insurer_name}': {e}")
+            return []
+
     def get_history_file(self, insurer_name):
         """
         Download history.xlsx for an insurer from the Matrix library.
@@ -692,8 +727,11 @@ def main():
                         insurer_name=folder['parent_folder']
                     )
                     
-                    # Download match history for this insurer (if it exists)
+                    # Fetch dynamic buckets for this insurer
                     insurer_name = folder['parent_folder']
+                    dynamic_buckets = sharepoint_service.get_dynamic_buckets(insurer_name)
+
+                    # Download match history for this insurer (if it exists)
                     logger.info(f"[HISTORY] Attempting to download history.xlsx for insurer: '{insurer_name}'")
                     logger.info(f"[HISTORY] Expected SharePoint path: Matrix/{insurer_name}/history.xlsx")
                     history_content = sharepoint_service.get_history_file(insurer_name)
@@ -711,6 +749,7 @@ def main():
                             insurer_file=insurer_file_content,
                             output_file="output.xlsx",
                             history_file=history_content,
+                            dynamic_buckets=dynamic_buckets,
                         )
                         
                         # Upload the result to SharePoint
