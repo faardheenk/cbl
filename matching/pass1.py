@@ -36,6 +36,10 @@ def pass1(cbl_df, insurer_df, tolerance=50, global_tracker=None):
         if i % 100 == 0:
             logger.info(f"Progress: {i+1}/{total_records} records processed")
 
+        # Skip rows already resolved by match history — user manual placements are authoritative
+        if row.get("match_resolved_in_pass") == "history":
+            continue
+
         add_pass(cbl_df, i, 1)
 
         placing = row["PlacingNo_Clean"]

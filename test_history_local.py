@@ -16,8 +16,8 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 # Paths — adjust if your files are elsewhere
-CBL_FILE = "data/cbl.xlsx"
-INSURER_FILE = "data/el.xlsx"
+CBL_FILE = "data/SOA CBL.xlsx"
+INSURER_FILE = "data/EI MERGE.xlsx"
 HISTORY_FILE = "data/history.xlsx"
 
 # Column mappings for EAGLE (adjust for your insurer)

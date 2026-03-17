@@ -780,11 +780,15 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
         return cbl_df
 
     # Get all records that have group_id and matched_insurer_indices
-    grouped_records = cbl_df[
+    # Exclude history-pre-placed rows — their insurer indices are not in available_insurer
+    base_mask = (
         (cbl_df['group_id'].notna()) &
         (cbl_df['matched_insurer_indices'].notna()) &
         (cbl_df['matched_insurer_indices'].apply(lambda x: isinstance(x, list) and len(x) > 0))
-    ].copy()
+    )
+    if 'match_resolved_in_pass' in cbl_df.columns:
+        base_mask = base_mask & (cbl_df['match_resolved_in_pass'] != 'history')
+    grouped_records = cbl_df[base_mask].copy()
 
     if grouped_records.empty:
         logger.info("No grouped records found for merging")
@@ -986,7 +990,11 @@ def pass3(cbl_df, insurer_df, tolerance=50, fuzzy_threshold=85, global_tracker=N
     logger.info(f"Pass 3 starting with global tracker: {global_tracker.get_usage_summary()}")
 
     # Get unmatched or partial match CBL records
-    unmatched_cbl = cbl_df[cbl_df['match_status'].isin(['No Match', 'Partial Match'])].copy()
+    # Exclude history-pre-placed rows — user manual placements are authoritative
+    status_mask = cbl_df['match_status'].isin(['No Match', 'Partial Match'])
+    if 'match_resolved_in_pass' in cbl_df.columns:
+        status_mask = status_mask & (cbl_df['match_resolved_in_pass'] != 'history')
+    unmatched_cbl = cbl_df[status_mask].copy()
     logger.info(f"Processing {len(unmatched_cbl)} CBL records with 'No Match' or 'Partial Match' status")
 
     if unmatched_cbl.empty:

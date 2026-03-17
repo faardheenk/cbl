@@ -142,13 +142,24 @@ def main():
         with open(insurer_file, 'rb') as f:
             insurer_file_content = f.read()
 
+        # Read history file if available
+        history_file_path = "data/history.xlsx"
+        history_file_content = None
+        if os.path.exists(history_file_path):
+            logger.info(f"📜 History file found: {history_file_path}")
+            with open(history_file_path, 'rb') as f:
+                history_file_content = f.read()
+        else:
+            logger.info("📜 No history file found — skipping match history layer")
+
         # Run the matching process
         results = run_matching_process(
             column_mappings=column_mappings,
             cbl_file=cbl_file_content,
             insurer_file=insurer_file_content,
             output_file=output_file,
-            tolerance=100
+            tolerance=100,
+            history_file=history_file_content
         )
         
         # Write the output file to disk
