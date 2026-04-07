@@ -772,6 +772,9 @@ def preprocess(cbl_df, insurer_df, column_mappings):
         insurer_df["PolicyNo_2_Clean_INSURER"] = ""
         logger.info("PolicyNo_2_INSURER column not found - creating empty column for compatibility")
 
+    # Add Remarks column for insurer side (initialized to empty string)
+    insurer_df["Remarks_INSURER"] = ""
+
     logger.info(f"Preprocessing complete: {len(cbl_df)} CBL records, {len(insurer_df)} insurer records")
     return cbl_df, insurer_df
 
@@ -788,4 +791,5 @@ def initialize_tracking(cbl_df):
     cbl_df["partial_candidates_indices"] = [[] for _ in range(len(cbl_df))]
     cbl_df["match_resolved_in_pass"] = None
     cbl_df["partial_resolved_in_pass"] = None
+    cbl_df["Remarks"] = ""
     return cbl_df

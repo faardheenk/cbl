@@ -2,7 +2,7 @@
 
 ## Overview
 
-Extend the reconciliation system to support **dynamic buckets** beyond the 3 fixed ones (Exact Matches, Partial Matches, No Matches). Dynamic buckets are defined per insurance company in a SharePoint list and allow users to manually categorize matched CBL+insurer pairs into custom categories (e.g., "Mise en Demeure", "Disputed", "Write-Off").
+Extend the reconciliation system to support **dynamic buckets** beyond the 3 fixed ones (Exact Matches, Partial Matches, No Matches). Dynamic buckets are defined globally in a SharePoint list and apply to all insurance companies. They allow users to manually categorize matched CBL+insurer pairs into custom categories (e.g., "Mise en Demeure", "Disputed", "Write-Off").
 
 ---
 
@@ -10,7 +10,6 @@ Extend the reconciliation system to support **dynamic buckets** beyond the 3 fix
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `InsuranceCompany` | Single line of text | Insurer name (e.g., "EAGLE INSURANCE LTD") |
 | `BucketName` | Single line of text | Display name shown in UI (e.g., "Mise en D'Meurre") |
 | `BucketKey` | Single line of text | Excel-safe key used as sheet name + history key (e.g., "Mise en DMeurre") |
 
@@ -22,240 +21,153 @@ Extend the reconciliation system to support **dynamic buckets** beyond the 3 fix
 
 ---
 
-## Backend Changes
+## Backend Changes (DONE)
 
 ### 1. Fetch dynamic buckets from SharePoint
 
-**File:** `sharepoint_dynamic.py`
+**File:** `sharepoint_dynamic.py` — `get_dynamic_buckets()`
 
-Add a new function:
-
-```python
-def get_dynamic_buckets(insurer_name: str) -> list[dict]:
-    """
-    Fetch dynamic bucket definitions from SharePoint 'Buckets' list
-    for the given insurer.
-
-    Returns:
-        list of {"BucketName": str, "BucketKey": str}
-    """
-```
-
-- Query the "Buckets" list filtered by `InsuranceCompany == insurer_name`
-- Return list of `{BucketName, BucketKey}` dicts
-- Return empty list if no dynamic buckets configured
+- Fetches all rows from the "Buckets" list (no insurer filter — global)
+- Returns `list[{"BucketName": str, "BucketKey": str}]`
+- Returns empty list on error
 
 ### 2. Pass dynamic buckets into `run_matching_process()`
 
 **File:** `matching/orchestrator.py`
 
-Update `run_matching_process()` signature:
-
-```python
-def run_matching_process(
-    column_mappings,
-    cbl_file=None,
-    insurer_file=None,
-    output_file='output.xlsx',
-    tolerance=50,
-    history_file=None,
-    dynamic_buckets=None,  # NEW — list of {"BucketName": str, "BucketKey": str}
-):
-```
-
-- `dynamic_buckets` is passed through to `apply_match_history()` and `_generate_output_and_statistics()`
+- `run_matching_process()` accepts `dynamic_buckets=None` parameter
+- Passed through to `apply_match_history()` and `_generate_output_and_statistics()`
 
 ### 3. Match history layer: support dynamic bucket targets
 
 **File:** `matching/match_history.py`
 
-**Current code (line 227):**
-```python
-if target not in ("exact", "partial", "no-match"):
-    logger.warning(f"Unknown target bucket '{target}' — skipping")
-    continue
-```
+- `apply_match_history()` accepts `dynamic_buckets` parameter
+- Valid targets = `{"exact", "partial", "no-match"}` + all `BucketKey` values from dynamic buckets
+- Dynamic bucket rows get sentinel `match_status = "_DynamicBucket_{BucketKey}"` so passes skip them
+- `match_resolved_in_pass = "history"` is set so all passes skip these rows
+- Insurer indices registered in GlobalTracker so passes don't reuse them
 
-**Change to:**
-```python
-# Build set of all valid bucket keys
-valid_targets = {"exact", "partial", "no-match"}
-if dynamic_buckets:
-    valid_targets.update(b["BucketKey"] for b in dynamic_buckets)
+### 4. All passes skip history-resolved rows
 
-if target not in valid_targets:
-    logger.warning(f"Unknown target bucket '{target}' — skipping")
-    continue
-```
+**Files:** `matching/pass1.py`, `matching/pass2.py`, `matching/pass3.py`
 
-**Dynamic bucket pre-placement logic:**
+- Pass 1: skips rows where `match_resolved_in_pass == "history"`
+- Pass 2: same skip (already filtered to No Match/Partial Match, now also checks history)
+- Pass 3: excludes history rows from `unmatched_cbl` selection + excludes from group merging
 
-Dynamic bucket targets should be treated like `exact`/`partial` targets since they contain matched CBL+insurer pairs:
+### 5. Finalization after passes
 
-```python
-if target in ("exact", "partial") or target in dynamic_bucket_keys:
-    # Same logic — set match_status, link insurer indices, lock in GlobalTracker
-    # For dynamic buckets, use a dedicated match_status value:
-    match_status = {
-        "exact": "Exact Match",
-        "partial": "Partial Match",
-    }.get(target, f"_DynamicBucket_{target}")  # sentinel for dynamic buckets
-    ...
-```
+**File:** `matching/orchestrator.py`
 
-Dynamic bucket rows get a sentinel `match_status` (like `_History_No_Match`) so passes skip them. After all passes complete, the sentinel is converted to the actual `BucketKey` value.
+After all passes complete, before output generation:
+- `finalize_history_no_match()` — converts `_History_No_Match` sentinel → `"No Match"`
+- `finalize_history_dynamic_buckets()` — converts `_DynamicBucket_{key}` sentinel → `{key}`
 
-**Update `apply_match_history()` signature:**
-```python
-def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None, dynamic_buckets=None):
-```
-
-**Add a finalization function:**
-```python
-def finalize_history_dynamic_buckets(cbl_df):
-    """Convert _DynamicBucket_* sentinels back to their BucketKey values after all passes."""
-    mask = cbl_df["match_status"].str.startswith("_DynamicBucket_", na=False)
-    if mask.any():
-        cbl_df.loc[mask, "match_status"] = cbl_df.loc[mask, "match_status"].str.replace("_DynamicBucket_", "", n=1)
-    return cbl_df
-```
-
-### 4. Output generation: add dynamic bucket sheets
+### 6. Output generation: dynamic bucket sheets + metadata
 
 **File:** `matching/orchestrator.py` — `_generate_output_and_statistics()`
 
-**Current code writes 4 fixed sheets:**
+Output sheets in order:
+1. `Exact Matches` (fixed)
+2. `Partial Matches` (fixed)
+3. `No Matches CBL` (fixed)
+4. `No Matches Insurer` (fixed)
+5. One sheet per dynamic bucket (sheet name = `BucketKey`)
+   - Contains exploded CBL+insurer merged rows (same format as Exact/Partial)
+   - Empty sheets written with headers if no rows, so frontend knows the bucket exists
+6. `_BucketConfig` (metadata sheet with `BucketName` + `BucketKey` columns)
+
+### 7. Statistics
+
+Return dict includes `dynamic_bucket_stats`:
 ```python
-exact_matches.to_excel(writer, sheet_name="Exact Matches", index=False)
-partial_matches.to_excel(writer, sheet_name="Partial Matches", index=False)
-no_matches.to_excel(writer, sheet_name="No Matches CBL", index=False)
-unmatched_insurer.to_excel(writer, sheet_name="No Matches Insurer", index=False)
-```
-
-**Add after the fixed sheets:**
-```python
-# Write dynamic bucket sheets
-if dynamic_buckets:
-    for bucket in dynamic_buckets:
-        bucket_key = bucket["BucketKey"]
-        bucket_rows = clean_cbl[clean_cbl["match_status"] == bucket_key].copy()
-        if not bucket_rows.empty:
-            # Explode and merge with insurer data (same as exact/partial)
-            bucket_merged = explode_and_merge(bucket_rows, clean_insurer)
-            bucket_merged.to_excel(writer, sheet_name=bucket_key, index=False)
-        else:
-            # Write empty sheet with headers so frontend knows the bucket exists
-            pd.DataFrame(columns=exact_matches.columns).to_excel(
-                writer, sheet_name=bucket_key, index=False
-            )
-```
-
-**Update `_generate_output_and_statistics()` signature:**
-```python
-def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets=None):
-```
-
-### 5. Include dynamic bucket metadata in output
-
-Add a hidden metadata sheet `_BucketConfig` to `output.xlsx` so the frontend knows which sheets are dynamic buckets and their display names:
-
-```python
-if dynamic_buckets:
-    bucket_config_df = pd.DataFrame(dynamic_buckets)  # BucketName, BucketKey columns
-    bucket_config_df.to_excel(writer, sheet_name="_BucketConfig", index=False)
-```
-
-### 6. Finalization order in orchestrator
-
-After all passes complete, before output generation:
-
-```python
-# Finalize history sentinels
-if history_file is not None:
-    clean_cbl = finalize_history_no_match(clean_cbl)
-    clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
-```
-
-### 7. Update statistics
-
-Dynamic bucket rows should be excluded from the standard exact/partial/no-match counts and reported separately:
-
-```python
-# In results dict, add:
 'dynamic_bucket_stats': {
-    bucket["BucketKey"]: len(clean_cbl[clean_cbl["match_status"] == bucket["BucketKey"]])
-    for bucket in (dynamic_buckets or [])
+    "BucketKey1": <row_count>,
+    "BucketKey2": <row_count>,
+    ...
 }
 ```
 
 ---
 
-## Frontend Changes
+## Frontend Changes (TODO)
 
-### 1. Read dynamic bucket configuration from output.xlsx
+### 1. Read `_BucketConfig` metadata sheet from output.xlsx
 
 When loading `output.xlsx`:
 
-- Check for `_BucketConfig` sheet
-- If present, parse it to get the list of dynamic buckets: `{BucketName, BucketKey}`
-- Each `BucketKey` corresponds to an additional sheet in the workbook
+- Check if a sheet named `_BucketConfig` exists in the workbook
+- If present, parse it to get the list of dynamic buckets:
+  ```
+  [{ BucketName: "Mise en D'Meurre", BucketKey: "Mise en DMeurre" }, ...]
+  ```
+- Store this config in state — it drives everything below
 
-### 2. Load dynamic bucket sheets
+### 2. Load dynamic bucket sheet data
 
-After loading the 3 fixed sheets (Exact Matches, Partial Matches, No Matches CBL, No Matches Insurer):
+After loading the 4 fixed sheets:
 
-- For each bucket in `_BucketConfig`, read the sheet named `BucketKey`
-- Split merged rows into CBL + insurer objects (same logic as Exact/Partial)
-- Store in state alongside the fixed buckets
+- For each entry in `_BucketConfig`, read the sheet named by `BucketKey`
+- Each sheet has the same column structure as Exact Matches / Partial Matches (merged CBL + insurer columns)
+- Split each row into CBL object + insurer object using the same logic as Exact/Partial:
+  - CBL columns = columns NOT ending in `_INSURER`
+  - Insurer columns = columns ending in `_INSURER` (strip suffix)
+- Store rows in state keyed by `BucketKey`
 
-### 3. Display dynamic buckets in UI
+### 3. Display dynamic bucket tabs in UI
 
-- Render dynamic bucket tabs/sections alongside the 3 fixed ones
-- Use `BucketName` for display labels (human-readable, may contain special chars)
-- Use `BucketKey` internally for state management
+- Render a tab/section for each dynamic bucket alongside the fixed tabs
+- Use `BucketName` as the display label (human-readable)
+- Use `BucketKey` as the internal identifier
+- Dynamic bucket tabs should show the same table format as Exact/Partial (CBL rows with linked insurer rows)
+- Show row count per bucket in the tab label
 
-### 4. Support moving rows to/from dynamic buckets
+### 4. Add dynamic buckets to the move-row target picker
 
-The existing move-row flow should work with dynamic buckets:
+The existing move-row UI (dropdown/dialog where user picks a destination bucket) needs to include dynamic buckets:
 
-- User selects CBL + insurer rows
-- User picks a target bucket (now includes dynamic buckets in the dropdown/picker)
-- Frontend reads `_fingerprint` / `_fingerprint_INSURER` from the row objects
-- Frontend saves to `history.xlsx` with:
-  - `FromBucket`: source bucket key (e.g., `"partial"`, `"exact"`, or a dynamic `BucketKey`)
-  - `TargetBucket`: destination bucket key (e.g., `"mise_en_dmeurre"`)
-  - `CblFingerprints`: JSON array of `_fingerprint` values
-  - `InsurerFingerprints`: JSON array of `_fingerprint_INSURER` values
-  - `Timestamp`: ISO 8601
+- Current options: `exact`, `partial`, `no-match`
+- New options: all `BucketKey` values from `_BucketConfig`, displayed with their `BucketName`
+- When a user moves rows TO a dynamic bucket, the same flow applies:
+  1. Read `_fingerprint` from CBL row objects (already present in the data)
+  2. Read `_fingerprint_INSURER` from insurer row objects (already present in the data)
+  3. Save to `history.xlsx` with `TargetBucket` = the dynamic `BucketKey`
 
-### 5. Fetch dynamic buckets from SharePoint (if frontend needs them independently)
+### 5. Support moving rows FROM dynamic buckets
 
-If the frontend needs to know available buckets before loading an output file (e.g., to show bucket options when no output exists yet):
+Users should also be able to move rows out of a dynamic bucket back to a fixed bucket (or another dynamic bucket):
 
-- Fetch from SharePoint "Buckets" list filtered by the current insurer
-- This is only needed if the frontend creates buckets or shows them before output.xlsx is loaded
-- Otherwise, the `_BucketConfig` sheet in output.xlsx is sufficient
+- `FromBucket` in history.xlsx = the source dynamic `BucketKey`
+- `TargetBucket` = destination bucket key
+- Same fingerprint read + save logic
 
-### 6. Exclude `_BucketConfig` sheet from data display
+### 6. Exclude `_BucketConfig` from data display
 
-The `_BucketConfig` sheet is metadata, not reconciliation data. Do not render it as a data tab.
+The `_BucketConfig` sheet is metadata. Do NOT render it as a data tab or include it in any row counts.
+
+### 7. No separate SharePoint fetch needed
+
+The frontend does NOT need to independently fetch from the SharePoint "Buckets" list. All bucket information is embedded in `output.xlsx` via the `_BucketConfig` sheet. The backend handles the SharePoint fetch at processing time.
 
 ---
 
 ## Data Flow
 
 ```
-SharePoint "Buckets" list
-    │
-    ▼
-Backend fetches dynamic buckets for current insurer
-    │
-    ▼
+SharePoint "Buckets" list (global, all insurers)
+    |
+    v
+Backend fetches dynamic buckets (no insurer filter)
+    |
+    v
 Backend runs matching:
     1. Preprocess + generate canonical fingerprints
     2. Match history layer (supports dynamic bucket targets)
+       - Rows matching history -> pre-placed with sentinel status
+       - Insurer indices locked in GlobalTracker
     3. Pass 1, 2, 3 (skip all history-resolved rows)
-    4. Finalize sentinels → actual bucket keys
+    4. Finalize sentinels -> actual bucket keys
     5. Write output.xlsx:
        - Exact Matches (fixed)
        - Partial Matches (fixed)
@@ -263,46 +175,50 @@ Backend runs matching:
        - No Matches Insurer (fixed)
        - {BucketKey} sheets (dynamic, one per bucket)
        - _BucketConfig (metadata)
-    │
-    ▼
+    |
+    v
 Frontend loads output.xlsx
-    - Reads _BucketConfig → knows which sheets are dynamic buckets
-    - Loads all sheets, splits merged rows
-    - Displays fixed + dynamic buckets
-    │
-    ▼
+    - Reads _BucketConfig -> knows which sheets are dynamic buckets
+    - Loads all sheets, splits merged rows into CBL + insurer
+    - Displays fixed + dynamic bucket tabs
+    |
+    v
 User moves rows between any buckets (fixed or dynamic)
-    │
-    ▼
+    |
+    v
 Frontend saves to history.xlsx
     - TargetBucket = BucketKey (works for both fixed and dynamic)
-    - Reads _fingerprint / _fingerprint_INSURER from row objects
-    │
-    ▼
+    - Reads _fingerprint / _fingerprint_INSURER directly from row objects
+    |
+    v
 Next run: backend reads history.xlsx
     - Pre-places rows into their target buckets (fixed or dynamic)
     - Passes skip all history-resolved rows
+    - Output includes rows in their correct sheets
 ```
 
 ---
 
-## Files to Modify
+## Files Modified
 
-### Backend
+### Backend (DONE)
 
 | File | Change |
 |------|--------|
-| `sharepoint_dynamic.py` | Add `get_dynamic_buckets(insurer_name)` |
-| `matching/orchestrator.py` | Accept `dynamic_buckets` param, pass to history + output, add dynamic sheets, finalize sentinels |
-| `matching/match_history.py` | Accept dynamic bucket keys as valid targets, add `finalize_history_dynamic_buckets()` |
-| `run_latest_matching.py` | Fetch dynamic buckets, pass to `run_matching_process()` |
+| `sharepoint_dynamic.py` | Added `get_dynamic_buckets()` (global, no insurer filter) |
+| `matching/orchestrator.py` | Accepts `dynamic_buckets`, passes to history + output, writes dynamic sheets + `_BucketConfig` |
+| `matching/match_history.py` | Accepts dynamic bucket keys as valid targets, sentinel prefix `_DynamicBucket_`, `finalize_history_dynamic_buckets()` |
+| `matching/pass1.py` | Skips rows with `match_resolved_in_pass == "history"` |
+| `matching/pass2.py` | Same skip |
+| `matching/pass3.py` | Same skip in CBL selection + group merge function |
 
-### Frontend
+### Frontend (TODO)
 
 | Area | Change |
 |------|--------|
-| Output loading | Read `_BucketConfig` sheet, load dynamic bucket sheets |
-| Bucket state | Add dynamic buckets to state alongside fixed buckets |
-| UI | Render dynamic bucket tabs, add to move-row target picker |
-| History save | Use `BucketKey` as `TargetBucket` for dynamic buckets |
-| Column exclusion | Exclude `_BucketConfig` sheet from data display |
+| Output loading | Read `_BucketConfig` sheet, load dynamic bucket sheets, split merged rows |
+| Bucket state | Store dynamic bucket rows in state keyed by `BucketKey` |
+| UI tabs | Render dynamic bucket tabs with `BucketName` labels |
+| Move-row picker | Add dynamic buckets to destination options |
+| History save | Use `BucketKey` as `TargetBucket` / `FromBucket` for dynamic buckets |
+| Sheet exclusion | Hide `_BucketConfig` sheet from data display |

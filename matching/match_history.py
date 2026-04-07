@@ -53,6 +53,9 @@ FINGERPRINT_EXCLUDE_COLUMNS = {
     # ── internal / temporary ──
     "_source_sheet",
     "_fingerprint",
+
+    # ── user annotations (preserved via history, not part of identity) ──
+    "Remarks",
 }
 
 # Sentinel value for no-match pre-placed rows — prevents passes from processing them.
@@ -141,9 +144,21 @@ def read_match_history(history_source) -> list:
             logger.warning(f"[HISTORY] Skipping malformed history entry #{i}: {e}")
             continue
 
+        # Parse optional remarks arrays (parallel to fingerprint arrays)
+        try:
+            cbl_remarks = json.loads(row["CblRemarks"]) if pd.notna(row.get("CblRemarks")) else []
+        except (json.JSONDecodeError, TypeError):
+            cbl_remarks = []
+        try:
+            ins_remarks = json.loads(row["InsurerRemarks"]) if pd.notna(row.get("InsurerRemarks")) else []
+        except (json.JSONDecodeError, TypeError):
+            ins_remarks = []
+
         entry = {
             "cbl_fingerprints": cbl_fps,
             "insurer_fingerprints": ins_fps,
+            "cbl_remarks": cbl_remarks,
+            "insurer_remarks": ins_remarks,
             "from_bucket": row.get("FromBucket", ""),
             "target_bucket": row.get("TargetBucket", ""),
             "timestamp": row.get("Timestamp", ""),
@@ -243,17 +258,22 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
 
         entry_cbl_indices = []
         entry_insurer_indices = []
+        cbl_remarks_list = entry.get("cbl_remarks", [])
+        ins_remarks_list = entry.get("insurer_remarks", [])
 
         # Match CBL fingerprints (one match per fingerprint)
         cbl_matched = 0
         cbl_missed = 0
-        for fp in entry["cbl_fingerprints"]:
+        for fp_idx, fp in enumerate(entry["cbl_fingerprints"]):
             if fp in cbl_fp_map:
                 for idx in cbl_fp_map[fp]:
                     if idx not in claimed_cbl:
                         entry_cbl_indices.append(idx)
                         claimed_cbl.add(idx)
                         cbl_matched += 1
+                        # Restore remark from history if available
+                        if fp_idx < len(cbl_remarks_list) and cbl_remarks_list[fp_idx]:
+                            cbl_df.at[idx, "Remarks"] = cbl_remarks_list[fp_idx]
                         break
             else:
                 cbl_missed += 1
@@ -263,13 +283,16 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
         # Match insurer fingerprints (one match per fingerprint)
         ins_matched = 0
         ins_missed = 0
-        for fp in entry["insurer_fingerprints"]:
+        for fp_idx, fp in enumerate(entry["insurer_fingerprints"]):
             if fp in insurer_fp_map:
                 for idx in insurer_fp_map[fp]:
                     if idx not in claimed_insurer:
                         entry_insurer_indices.append(idx)
                         claimed_insurer.add(idx)
                         ins_matched += 1
+                        # Restore remark from history if available
+                        if fp_idx < len(ins_remarks_list) and ins_remarks_list[fp_idx]:
+                            insurer_df.at[idx, "Remarks_INSURER"] = ins_remarks_list[fp_idx]
                         break
             else:
                 ins_missed += 1
