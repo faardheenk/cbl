@@ -6448,6 +6448,7 @@ imported by:
  &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
  &#8226;   <a href="#http.server">http.server</a>
  &#8226;   <a href="#jwt.api_jwt">jwt.api_jwt</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#msal.wstrust_request">msal.wstrust_request</a>
  &#8226;   <a href="#office365.booking.business.business">office365.booking.business.business</a>
  &#8226;   <a href="#office365.communications.callrecords.collection">office365.communications.callrecords.collection</a>
@@ -11330,7 +11331,6 @@ imports:
  &#8226;   <a href="#importlib">importlib</a>
  &#8226;   <a href="#importlib._bootstrap">importlib._bootstrap</a>
  &#8226;   <a href="#importlib._bootstrap_external">importlib._bootstrap_external</a>
- &#8226;   <a href="#importlib.machinery">importlib.machinery</a>
  &#8226;   <a href="#sys">sys</a>
  &#8226;   <a href="#warnings">warnings</a>
 
@@ -11470,8 +11470,7 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#importlib">importlib</a>
- &#8226;   <a href="#importlib.abc">importlib.abc</a>
+    <a href="#importlib.abc">importlib.abc</a>
  &#8226;   <a href="#inspect">inspect</a>
  &#8226;   <a href="#pkgutil">pkgutil</a>
  &#8226;   <a href="#py_compile">py_compile</a>
@@ -11961,6 +11960,7 @@ imported by:
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#lzma">lzma</a>
  &#8226;   <a href="#matching.data_processing">matching.data_processing</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#matching.orchestrator">matching.orchestrator</a>
  &#8226;   <a href="#multiprocessing.connection">multiprocessing.connection</a>
  &#8226;   <a href="#multiprocessing.popen_forkserver">multiprocessing.popen_forkserver</a>
@@ -12076,6 +12076,7 @@ imported by:
  &#8226;   <a href="#importlib.resources._itertools">importlib.resources._itertools</a>
  &#8226;   <a href="#inspect">inspect</a>
  &#8226;   <a href="#matching.pass1">matching.pass1</a>
+ &#8226;   <a href="#matching.pass3">matching.pass3</a>
  &#8226;   <a href="#multiprocessing.connection">multiprocessing.connection</a>
  &#8226;   <a href="#multiprocessing.pool">multiprocessing.pool</a>
  &#8226;   <a href="#multiprocessing.process">multiprocessing.process</a>
@@ -12171,6 +12172,7 @@ imported by:
  &#8226;   <a href="#jwt.api_jws">jwt.api_jws</a>
  &#8226;   <a href="#jwt.api_jwt">jwt.api_jwt</a>
  &#8226;   <a href="#jwt.jwks_client">jwt.jwks_client</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#msal.application">msal.application</a>
  &#8226;   <a href="#msal.authority">msal.authority</a>
  &#8226;   <a href="#msal.broker">msal.broker</a>
@@ -12659,6 +12661,7 @@ imported by:
  &#8226;   <a href="#hashlib">hashlib</a>
  &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
  &#8226;   <a href="#matching.data_processing">matching.data_processing</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#matching.matching_engine">matching.matching_engine</a>
  &#8226;   <a href="#matching.orchestrator">matching.orchestrator</a>
  &#8226;   <a href="#matching.output_handler">matching.output_handler</a>
@@ -12765,6 +12768,7 @@ imported by:
 <span class="moduletype">Package</span>  <div class="import">
 imported by:
     <a href="#matching.data_processing">matching.data_processing</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#matching.matching_engine">matching.matching_engine</a>
  &#8226;   <a href="#matching.orchestrator">matching.orchestrator</a>
  &#8226;   <a href="#matching.output_handler">matching.output_handler</a>
@@ -12786,7 +12790,6 @@ imports:
     <a href="#io">io</a>
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#matching">matching</a>
- &#8226;   <a href="#matrix">matrix</a>
  &#8226;   <a href="#pandas">pandas</a>
  &#8226;   <a href="#re">re</a>
 
@@ -12795,6 +12798,27 @@ imports:
 imported by:
     <a href="#matching.orchestrator">matching.orchestrator</a>
  &#8226;   <a href="#sharepoint_dynamic.py">sharepoint_dynamic.py</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="matching.match_history"></a>
+  <a target="code" href="///C:/Users/faardheenk/dev/city-brokers-multipass-py/matching/match_history.py" type="text/plain"><tt>matching.match_history</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#datetime">datetime</a>
+ &#8226;   <a href="#io">io</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#logging">logging</a>
+ &#8226;   <a href="#matching">matching</a>
+ &#8226;   <a href="#pandas">pandas</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#matching.orchestrator">matching.orchestrator</a>
 
   </div>
 
@@ -12837,12 +12861,12 @@ imports:
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#matching">matching</a>
  &#8226;   <a href="#matching.data_processing">matching.data_processing</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#matching.matching_engine">matching.matching_engine</a>
  &#8226;   <a href="#matching.output_handler">matching.output_handler</a>
  &#8226;   <a href="#matching.pass1">matching.pass1</a>
  &#8226;   <a href="#matching.pass2">matching.pass2</a>
  &#8226;   <a href="#matching.pass3">matching.pass3</a>
- &#8226;   <a href="#matrix">matrix</a>
  &#8226;   <a href="#os">os</a>
  &#8226;   <a href="#pandas">pandas</a>
 
@@ -12925,6 +12949,7 @@ imported by:
 imports:
     <a href="#fuzzywuzzy">fuzzywuzzy</a>
  &#8226;   <a href="#fuzzywuzzy.fuzz">fuzzywuzzy.fuzz</a>
+ &#8226;   <a href="#itertools">itertools</a>
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#matching">matching</a>
  &#8226;   <a href="#matching.matching_engine">matching.matching_engine</a>
@@ -13025,9 +13050,7 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#matching.data_processing">matching.data_processing</a>
- &#8226;   <a href="#matching.orchestrator">matching.orchestrator</a>
- &#8226;   <a href="#sharepoint_dynamic.py">sharepoint_dynamic.py</a>
+    <a href="#sharepoint_dynamic.py">sharepoint_dynamic.py</a>
 
   </div>
 
@@ -61794,6 +61817,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#matching.data_processing">matching.data_processing</a>
+ &#8226;   <a href="#matching.match_history">matching.match_history</a>
  &#8226;   <a href="#matching.matching_engine">matching.matching_engine</a>
  &#8226;   <a href="#matching.orchestrator">matching.orchestrator</a>
  &#8226;   <a href="#matching.output_handler">matching.output_handler</a>

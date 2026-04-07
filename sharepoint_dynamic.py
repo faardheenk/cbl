@@ -33,24 +33,24 @@ class SharePointService:
     def __init__(self):
         """Initialize SharePoint service with credentials from environment variables."""
         # Load environment variables
-        if load_dotenv:
-            load_dotenv(override=True)
+        # if load_dotenv:
+        #     load_dotenv(override=True)
         
         # Get SharePoint configuration from environment variables
         # self.site_url = os.getenv('SITE_URL')
         # self.client_username = os.getenv('SP_USERNAME')
         # self.client_password = os.getenv('PASSWORD')
-        self.site_url = os.getenv('SITE_URL')
-        self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
-        self.client_id = os.getenv('CLIENT_ID')
-        self.tenant=os.getenv('TENANT')
-        self.cert_path=os.getenv('CERT_PATH')
+        # self.site_url = os.getenv('SITE_URL')
+        # self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
+        # self.client_id = os.getenv('CLIENT_ID')
+        # self.tenant=os.getenv('TENANT')
+        # self.cert_path=os.getenv('CERT_PATH')
 
-        # self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
-        # self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
-        # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
-        # self.tenant= "citybrokersltdmu.onmicrosoft.com"
-        # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
+        self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
+        self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
+        self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
+        self.tenant= "citybrokersltdmu.onmicrosoft.com"
+        self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
 
         self.cert_credentials = {
             "tenant": self.tenant,
@@ -218,13 +218,10 @@ class SharePointService:
                 raise
 
 
-    def get_dynamic_buckets(self, insurer_name):
+    def get_dynamic_buckets(self):
         """
-        Fetch dynamic bucket definitions from SharePoint 'Buckets' list
-        for the given insurer.
-
-        Args:
-            insurer_name: Name of the insurer (e.g., "EAGLE INSURANCE LTD")
+        Fetch dynamic bucket definitions from SharePoint 'Buckets' list.
+        Buckets are global and apply to all insurance companies.
 
         Returns:
             list of {"BucketName": str, "BucketKey": str}
@@ -232,8 +229,7 @@ class SharePointService:
         try:
             ctx = self.get_client_context()
             bucket_list = ctx.web.lists.get_by_title("Buckets")
-            query = f"InsuranceCompany eq '{insurer_name}'"
-            items = bucket_list.items.filter(query).select(
+            items = bucket_list.items.select(
                 ['BucketName', 'BucketKey']
             ).get().execute_query()
 
@@ -247,10 +243,10 @@ class SharePointService:
                         'BucketKey': bucket_key,
                     })
 
-            logger.info(f"[BUCKETS] Fetched {len(buckets)} dynamic buckets for '{insurer_name}': {[b['BucketKey'] for b in buckets]}")
+            logger.info(f"[BUCKETS] Fetched {len(buckets)} dynamic buckets: {[b['BucketKey'] for b in buckets]}")
             return buckets
         except Exception as e:
-            logger.warning(f"[BUCKETS] Could not fetch dynamic buckets for '{insurer_name}': {e}")
+            logger.warning(f"[BUCKETS] Could not fetch dynamic buckets: {e}")
             return []
 
     def get_history_file(self, insurer_name):
@@ -727,9 +723,9 @@ def main():
                         insurer_name=folder['parent_folder']
                     )
                     
-                    # Fetch dynamic buckets for this insurer
+                    # Fetch dynamic buckets (global, applies to all insurers)
                     insurer_name = folder['parent_folder']
-                    dynamic_buckets = sharepoint_service.get_dynamic_buckets(insurer_name)
+                    dynamic_buckets = sharepoint_service.get_dynamic_buckets()
 
                     # Download match history for this insurer (if it exists)
                     logger.info(f"[HISTORY] Attempting to download history.xlsx for insurer: '{insurer_name}'")

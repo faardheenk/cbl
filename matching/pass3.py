@@ -4,12 +4,14 @@ import pandas as pd
 import logging
 import re
 from typing import Dict, List, Tuple, Optional, Set
+from itertools import combinations
 from fuzzywuzzy import fuzz
 from .utils import add_pass
 from .matching_engine import (
     CompanyNameMatcher,
     GlobalMatchTracker,
     classify_amount_match,
+    validate_substring_match,
     _apply_cluster_exact_match,
     _apply_partial_match,
     _apply_no_match,
@@ -903,6 +905,345 @@ def _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, gl
     return cbl_df
 
 
+def _line_by_line_name_matching(cbl_df, remaining_cbl, available_insurer, insurer_df,
+                                global_tracker, tolerance=50, name_threshold=85,
+                                group_counter=0):
+    """
+    Line-by-line name + amount matching for remaining unmatched CBL records.
+
+    For each unmatched CBL row, finds the best insurer row(s) by:
+      1. Client name similarity (>= name_threshold)
+      2. Amount validation (single match or combination of 2-5 insurer rows)
+
+    This is more precise than group-based matching because it establishes
+    actual 1:1 or 1:few relationships between CBL and insurer rows.
+
+    Args:
+        cbl_df: Full CBL DataFrame (modified in-place)
+        remaining_cbl: Subset of unmatched CBL rows to process
+        available_insurer: Insurer rows not yet used in exact matches
+        insurer_df: Full insurer DataFrame (for amount lookups)
+        global_tracker: GlobalMatchTracker instance
+        tolerance: Amount tolerance for exact match classification
+        name_threshold: Minimum similarity score for name matching (default: 85)
+        group_counter: Starting group counter for group_id assignment
+
+    Returns:
+        tuple: (exact_match_count, set of matched CBL indices)
+    """
+    matcher = CompanyNameMatcher(primary_penalty=0.3, exact_match_boost=2.5)
+
+    # Pre-extract primary names for all available insurer rows
+    insurer_primary_names = {}
+    for idx in available_insurer.index:
+        name = str(available_insurer.at[idx, 'ClientName_INSURER']).upper().strip()
+        if name and name != 'NAN':
+            primary, _ = matcher.extract_primary_company(name)
+            insurer_primary_names[idx] = primary
+
+    logger.info(f"Pre-extracted {len(insurer_primary_names)} insurer primary names")
+
+    # Collect all potential matches, then apply greedily by quality
+    all_potential = []
+
+    for cbl_idx in remaining_cbl.index:
+        cbl_name = str(cbl_df.at[cbl_idx, 'ClientName']).upper().strip()
+        if not cbl_name or cbl_name == 'NAN':
+            continue
+
+        cbl_primary, _ = matcher.extract_primary_company(cbl_name)
+        cbl_amt = cbl_df.at[cbl_idx, 'ProcessedAmount_Clean']
+        if pd.isna(cbl_amt):
+            continue
+
+        # Find insurer rows with similar names
+        name_matches = []
+        for ins_idx, ins_primary in insurer_primary_names.items():
+            similarity = matcher.calculate_intelligent_similarity(cbl_primary, ins_primary)
+            if similarity >= name_threshold:
+                ins_amt = available_insurer.at[ins_idx, 'ProcessedAmount_Clean_INSURER']
+                if pd.notna(ins_amt):
+                    name_matches.append({
+                        'ins_idx': ins_idx,
+                        'ins_primary': ins_primary,
+                        'ins_amt': ins_amt,
+                        'similarity': similarity,
+                    })
+
+        if not name_matches:
+            continue
+
+        # Try single match first
+        for nm in name_matches:
+            match_type, difference, confidence = classify_amount_match(cbl_amt, nm['ins_amt'], tolerance)
+            if match_type in ["PERFECT_MATCH", "EXACT_MATCH"]:
+                all_potential.append({
+                    'cbl_idx': cbl_idx,
+                    'insurer_indices': [nm['ins_idx']],
+                    'difference': difference,
+                    'confidence': confidence,
+                    'similarity': nm['similarity'],
+                    'cbl_primary': cbl_primary,
+                    'ins_primary': nm['ins_primary'],
+                    'cbl_amt': cbl_amt,
+                    'match_type': 'single',
+                })
+
+        # Try combination matches (2-5 items from top 20 most promising)
+        if len(name_matches) >= 2:
+            target = -cbl_amt
+            sorted_nms = sorted(name_matches, key=lambda x: abs(x['ins_amt'] - target))
+            limited = sorted_nms[:20]
+            max_combo = min(5, len(limited))
+
+            for r in range(2, max_combo + 1):
+                found = False
+                for combo in combinations(limited, r):
+                    total_amt = sum(c['ins_amt'] for c in combo)
+                    match_type, difference, confidence = classify_amount_match(cbl_amt, total_amt, tolerance)
+                    if match_type in ["PERFECT_MATCH", "EXACT_MATCH"]:
+                        avg_sim = sum(c['similarity'] for c in combo) / len(combo)
+                        all_potential.append({
+                            'cbl_idx': cbl_idx,
+                            'insurer_indices': [c['ins_idx'] for c in combo],
+                            'difference': difference,
+                            'confidence': confidence,
+                            'similarity': avg_sim,
+                            'cbl_primary': cbl_primary,
+                            'ins_primary': combo[0]['ins_primary'],
+                            'cbl_amt': cbl_amt,
+                            'match_type': 'combination',
+                        })
+                        found = True
+                        break
+                if found:
+                    break
+
+    logger.info(f"Found {len(all_potential)} potential line-by-line matches")
+
+    # Sort by: highest similarity first, then lowest amount difference
+    all_potential.sort(key=lambda x: (-x['similarity'], x['difference']))
+
+    # Apply matches greedily (best quality first)
+    matched_cbl = set()
+    used_insurer = set()
+    exact_count = 0
+    local_group_counter = group_counter
+
+    for match in all_potential:
+        cbl_idx = match['cbl_idx']
+        if cbl_idx in matched_cbl:
+            continue
+
+        insurer_indices = match['insurer_indices']
+
+        # Check insurer rows not already used in this phase
+        if any(idx in used_insurer for idx in insurer_indices):
+            continue
+
+        # Check insurer availability via global tracker
+        can_use, available_idx, conflicts = global_tracker.can_use_for_exact(insurer_indices)
+        if not available_idx:
+            continue
+        insurer_indices = available_idx
+
+        # Apply the match using cluster-style (consistent with other Pass 3 phases)
+        add_pass(cbl_df, cbl_idx, 3)
+        total_amount = insurer_df.loc[insurer_indices, 'ProcessedAmount_Clean_INSURER'].sum()
+
+        match_reason = (
+            f"Name Match (Line-by-Line): "
+            f"{match['cbl_primary'][:40]} ~ {match['ins_primary'][:40]} "
+            f"({match['similarity']:.0f}% sim, {match['confidence']})"
+        )
+
+        _apply_cluster_exact_match(
+            cbl_df, cbl_idx, match_reason, insurer_indices,
+            total_amount, 3, global_tracker,
+            confidence_level=match['confidence'],
+            amount_difference=match['difference']
+        )
+
+        exact_count += 1
+        matched_cbl.add(cbl_idx)
+        for idx in insurer_indices:
+            used_insurer.add(idx)
+
+        local_group_counter += 1
+        cbl_df.at[cbl_idx, 'group_id'] = f"NAME_GROUP_{local_group_counter}_LBL"
+
+        logger.info(
+            f"  ✓ CBL {cbl_idx}: {match['match_type']} match "
+            f"'{match['cbl_primary'][:30]}' ~ '{match['ins_primary'][:30]}' "
+            f"({match['similarity']:.0f}%, diff={match['difference']:.2f}, "
+            f"insurer={insurer_indices})"
+        )
+
+    return exact_count, matched_cbl
+
+
+def _placing_based_regrouping(cbl_df, insurer_df, global_tracker, tolerance=50):
+    """
+    Regroup partial matches by placing number.
+
+    For each partial match group, check if CBL and insurer rows share placing numbers.
+    If a placing-based sub-group's amounts balance within tolerance, upgrade to exact match.
+
+    Args:
+        cbl_df: Full CBL DataFrame (modified in-place)
+        insurer_df: Full insurer DataFrame
+        global_tracker: GlobalMatchTracker instance
+        tolerance: Amount tolerance for exact match classification
+
+    Returns:
+        tuple: (upgraded_count, new_group_counter_offset)
+    """
+    partial_mask = cbl_df['match_status'] == 'Partial Match'
+    partial_rows = cbl_df[partial_mask].copy()
+
+    if partial_rows.empty:
+        logger.info("No partial matches to regroup by placing number")
+        return 0, 0
+
+    logger.info(f"Analyzing {len(partial_rows)} partial match rows for placing-based regrouping")
+
+    # Check if PlacingNo columns exist
+    has_placing_cbl = 'PlacingNo_Clean' in cbl_df.columns
+    has_placing_ins = 'PlacingNo_Clean_INSURER' in insurer_df.columns
+
+    if not has_placing_cbl or not has_placing_ins:
+        logger.info("PlacingNo columns not available — skipping placing-based regrouping")
+        return 0, 0
+
+    # Group partial match rows by group_id
+    groups = {}
+    for idx, row in partial_rows.iterrows():
+        gid = row.get('group_id')
+        if pd.notna(gid) and gid:
+            groups.setdefault(gid, []).append(idx)
+
+    logger.info(f"Found {len(groups)} partial match groups to analyze")
+
+    upgraded_count = 0
+    new_groups_created = 0
+
+    for group_id, cbl_indices in groups.items():
+        if len(cbl_indices) < 1:
+            continue
+
+        # Get the insurer indices for this group (all rows in the group share the same insurer indices)
+        insurer_indices = cbl_df.at[cbl_indices[0], 'matched_insurer_indices']
+        if not isinstance(insurer_indices, list) or not insurer_indices:
+            continue
+
+        # Build placing-number sub-groups
+        # Map: placing_no -> {cbl_indices: [], insurer_indices: []}
+        placing_subgroups = {}
+
+        for cbl_idx in cbl_indices:
+            placing = str(cbl_df.at[cbl_idx, 'PlacingNo_Clean']).strip()
+            if placing and placing != 'nan' and placing != 'NAN':
+                placing_subgroups.setdefault(placing, {'cbl': [], 'insurer': []})
+                placing_subgroups[placing]['cbl'].append(cbl_idx)
+
+        # Match insurer rows to placing sub-groups
+        for ins_idx in insurer_indices:
+            if ins_idx not in insurer_df.index:
+                continue
+            ins_placing = str(insurer_df.at[ins_idx, 'PlacingNo_Clean_INSURER']).strip()
+            if ins_placing and ins_placing != 'nan' and ins_placing != 'NAN':
+                # Check exact match first
+                if ins_placing in placing_subgroups:
+                    placing_subgroups[ins_placing]['insurer'].append(ins_idx)
+                else:
+                    # Check substring overlap match
+                    for placing_key in placing_subgroups:
+                        is_valid, _ = validate_substring_match(placing_key, ins_placing)
+                        if is_valid:
+                            placing_subgroups[placing_key]['insurer'].append(ins_idx)
+                            break
+
+        # Check if any placing sub-group can be upgraded to exact
+        for placing_no, subgroup in placing_subgroups.items():
+            sub_cbl = subgroup['cbl']
+            sub_ins = subgroup['insurer']
+
+            if not sub_cbl or not sub_ins:
+                continue
+
+            # Skip if this sub-group is the entire original group (no benefit to regrouping)
+            if set(sub_cbl) == set(cbl_indices) and set(sub_ins) == set(insurer_indices):
+                continue
+
+            # Calculate amounts for the sub-group
+            cbl_total = cbl_df.loc[sub_cbl, 'ProcessedAmount_Clean'].sum()
+            ins_total = insurer_df.loc[sub_ins, 'ProcessedAmount_Clean_INSURER'].sum()
+            difference = abs(cbl_total + ins_total)
+
+            match_type, _, confidence = classify_amount_match(cbl_total, ins_total, tolerance)
+            is_exact = match_type in ["PERFECT_MATCH", "EXACT_MATCH"]
+
+            if is_exact:
+                # Check insurer availability
+                can_use, available_idx, _ = global_tracker.can_use_for_exact(sub_ins)
+                if not available_idx:
+                    continue
+
+                sub_ins = available_idx
+                ins_total = insurer_df.loc[sub_ins, 'ProcessedAmount_Clean_INSURER'].sum()
+                difference = abs(cbl_total + ins_total)
+                match_type, _, confidence = classify_amount_match(cbl_total, ins_total, tolerance)
+
+                if match_type not in ["PERFECT_MATCH", "EXACT_MATCH"]:
+                    continue
+
+                new_groups_created += 1
+                new_gid = f"{group_id}_PLACING_{new_groups_created}"
+
+                logger.info(f"\n  Placing sub-group upgrade: {group_id} → {new_gid}")
+                logger.info(f"    Placing No: {placing_no}")
+                logger.info(f"    CBL rows: {sub_cbl}, Insurer rows: {sub_ins}")
+                logger.info(f"    CBL Total: Rs{cbl_total:.2f}, Insurer Total: Rs{ins_total:.2f}")
+                logger.info(f"    Difference: Rs{difference:.2f} → EXACT ({confidence})")
+
+                for cbl_idx in sub_cbl:
+                    match_reason = (
+                        f"Placing Regroup: {placing_no} "
+                        f"({len(sub_cbl)} CBL, {len(sub_ins)} insurer, {confidence})"
+                    )
+
+                    _apply_cluster_exact_match(
+                        cbl_df, cbl_idx, match_reason, sub_ins,
+                        ins_total, 3, global_tracker,
+                        confidence_level=confidence,
+                        amount_difference=difference
+                    )
+
+                    cbl_df.at[cbl_idx, 'group_id'] = new_gid
+                    upgraded_count += 1
+
+                    logger.info(f"    ✓ CBL {cbl_idx}: Upgraded to EXACT via placing regroup")
+
+                # Remove upgraded insurer indices from remaining CBL rows in the original group
+                remaining_cbl_in_group = [idx for idx in cbl_indices if idx not in sub_cbl]
+                if remaining_cbl_in_group:
+                    for cbl_idx in remaining_cbl_in_group:
+                        current_ins = cbl_df.at[cbl_idx, 'matched_insurer_indices']
+                        if isinstance(current_ins, list):
+                            updated_ins = [i for i in current_ins if i not in sub_ins]
+                            cbl_df.at[cbl_idx, 'matched_insurer_indices'] = updated_ins
+
+                            # Recalculate amounts for remaining group
+                            if updated_ins:
+                                new_ins_total = insurer_df.loc[updated_ins, 'ProcessedAmount_Clean_INSURER'].sum()
+                                cbl_df.at[cbl_idx, 'matched_amtdue_total'] = new_ins_total
+                                cbl_amt = cbl_df.at[cbl_idx, 'ProcessedAmount_Clean']
+                                new_diff = abs(cbl_df.loc[remaining_cbl_in_group, 'ProcessedAmount_Clean'].sum() + new_ins_total)
+                                cbl_df.at[cbl_idx, 'Amount Difference'] = round(new_diff, 2)
+
+    return upgraded_count, new_groups_created
+
+
 def pass3(cbl_df, insurer_df, tolerance=50, fuzzy_threshold=85, global_tracker=None):
     """
     Pass 3: Intelligent Name Matching with Corporate Root & Fuzzy Clustering.
@@ -1445,11 +1786,55 @@ def pass3(cbl_df, insurer_df, tolerance=50, fuzzy_threshold=85, global_tracker=N
     else:
         logger.info("No remaining records for secondary root matching")
 
-    # ========== PHASE 4: MERGE GROUPS WITH OVERLAPPING INSURER INDICES ==========
+    # ========== PHASE 4: LINE-BY-LINE NAME + AMOUNT MATCHING ==========
+    logger.info("\n=== Phase 4: Line-by-Line Name + Amount Matching ===")
+    logger.info("Purpose: Match individual CBL rows to specific insurer rows by name similarity + amount validation")
+
+    phase4_matched_cbl = set()
+    phase4_matches = 0
+
+    # Get CBL records still unmatched after Phases 1-3
+    already_matched_phases = phase1_matched_cbl | phase2_matched_cbl | phase3_matched_cbl
+    remaining_for_phase4 = unmatched_cbl[~unmatched_cbl.index.isin(already_matched_phases)].copy()
+
+    # Refresh available insurer rows (some may have been used in Phases 1-3)
+    already_used_insurer = global_tracker.exact_used_insurer | global_tracker.matrix_used_insurer
+    available_insurer_p4 = insurer_df[~insurer_df.index.isin(already_used_insurer)].copy()
+
+    logger.info(f"Processing {len(remaining_for_phase4)} remaining CBL records against {len(available_insurer_p4)} available insurer rows")
+
+    if not remaining_for_phase4.empty and not available_insurer_p4.empty:
+        lbl_exact, lbl_matched = _line_by_line_name_matching(
+            cbl_df, remaining_for_phase4, available_insurer_p4, insurer_df,
+            global_tracker, tolerance, name_threshold=85, group_counter=group_counter
+        )
+        exact_matches += lbl_exact
+        phase4_matched_cbl = lbl_matched
+        phase4_matches = len(lbl_matched)
+        group_counter += phase4_matches
+
+        logger.info(f"\n✓ Phase 4 Complete: {phase4_matches} matches via line-by-line name matching")
+    else:
+        logger.info("No remaining records for line-by-line matching")
+
+    # ========== PHASE 5: PLACING-BASED REGROUPING OF PARTIAL MATCHES ==========
+    logger.info("\n=== Phase 5: Placing-Based Regrouping of Partial Matches ===")
+    logger.info("Purpose: Sub-divide partial match groups by placing number to find exact sub-matches")
+
+    phase5_upgraded, phase5_new_groups = _placing_based_regrouping(
+        cbl_df, insurer_df, global_tracker, tolerance
+    )
+    exact_matches += phase5_upgraded
+
+    logger.info(f"\n✓ Phase 5 Complete: {phase5_upgraded} partial matches upgraded to exact via placing regrouping ({phase5_new_groups} new sub-groups)")
+
+    # ========== PHASE 6: MERGE GROUPS WITH OVERLAPPING INSURER INDICES ==========
     cbl_df = _merge_groups_with_overlapping_insurer_indices(cbl_df, available_insurer, global_tracker)
 
     logger.info(f"\n✓ Pass 3 Complete: {exact_matches} exact matches, {partial_matches} partial matches in {group_counter} name groups")
     logger.info(f"   Phase 1 (Corporate Root - Primary): Matched {len(phase1_matched_cbl)} records")
     logger.info(f"   Phase 2 (Fuzzy Clustering): Matched {len(phase2_matched_cbl)} records")
     logger.info(f"   Phase 3 (Secondary Root - Loose): Matched {len(phase3_matched_cbl)} records")
+    logger.info(f"   Phase 4 (Line-by-Line Name + Amount): Matched {len(phase4_matched_cbl)} records")
+    logger.info(f"   Phase 5 (Placing-Based Regrouping): Upgraded {phase5_upgraded} partial → exact")
     return cbl_df
