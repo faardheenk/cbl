@@ -578,10 +578,9 @@ def preprocess(cbl_df, insurer_df, column_mappings):
                         df[temp_name] = df[original_source]
                         new_column_map[temp_name] = target_col
             else:
-                # Single mapping
+                # Single mapping — use the resolved original_source (actual column name)
                 for source_key, target_col in mappings:
-                    actual_source = source_key.rsplit('_', 1)[0] if '_' in source_key else source_key
-                    new_column_map[actual_source] = target_col
+                    new_column_map[original_source] = target_col
         
         return df, new_column_map
 

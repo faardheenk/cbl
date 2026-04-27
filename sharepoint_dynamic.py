@@ -46,6 +46,12 @@ class SharePointService:
         # self.tenant=os.getenv('TENANT')
         # self.cert_path=os.getenv('CERT_PATH')
 
+        # self.site_url = "https://frcidevtest.sharepoint.com/sites/CityBroker2"
+        # self.cert_thumbprint = "C8F25C2F82B6F5712662D175C42FDD3E355B953B"
+        # self.client_id = "8f9f6a06-b2b8-4f3b-9d10-9a0390e94ea7"
+        # self.tenant= "frcidevtest.onmicrosoft.com"
+        # self.cert_path= "C:\\Users\\boshavg.SERVICES\\Desktop\\Projects\\CBL\\certificate\\cert.pem"
+
         self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
         self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
         self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
@@ -705,15 +711,15 @@ def main():
                     insurer_file_name = None
                     
                     for file in excel_files:
-                        if 'cbl' in file['name'].lower():
+                        if file['name'].lower() == 'cbl.xlsx':
                             cbl_file_content = file['content']
                             cbl_file_name = file['name']
-                        else:
+                        elif file['name'].lower() == 'insurer.xlsx':
                             insurer_file_content = file['content']
                             insurer_file_name = file['name']
-                    
+
                     if not cbl_file_content or not insurer_file_content:
-                        raise ValueError("Could not identify CBL and insurer files")
+                        raise ValueError("Expected files named 'cbl.xlsx' and 'insurer.xlsx'")
                     
                     # 🆕 CREATE DYNAMIC COLUMN MAPPINGS
                     logger.info(f"🎯 Creating dynamic column mappings for {folder['parent_folder']}...")
