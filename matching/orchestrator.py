@@ -152,6 +152,24 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
             clean_cbl = finalize_history_no_match(clean_cbl)
             clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
 
+        # ── Assign group_id to all matched rows ─────────────────────
+        # Individual 1:1 matches from pass1 have no group_id.
+        # Assign one so every matched row carries a group_id for
+        # frontend selection/highlighting.
+        if 'group_id' in clean_cbl.columns:
+            matched_mask = clean_cbl['match_status'].isin(['Exact Match', 'Partial Match'])
+            no_group_mask = matched_mask & (clean_cbl['group_id'].isna() | (clean_cbl['group_id'] == ''))
+            if dynamic_buckets:
+                dynamic_keys = {b['BucketKey'] for b in dynamic_buckets}
+                dynamic_mask = clean_cbl['match_status'].isin(dynamic_keys)
+                no_group_mask = no_group_mask | (dynamic_mask & (clean_cbl['group_id'].isna() | (clean_cbl['group_id'] == '')))
+            individual_counter = 0
+            for idx in clean_cbl[no_group_mask].index:
+                individual_counter += 1
+                clean_cbl.at[idx, 'group_id'] = f"MATCH_{individual_counter}"
+            if individual_counter > 0:
+                logger.info(f"Assigned group_id to {individual_counter} individual matched rows without one")
+
         # Sort by group_id to keep grouped rows together in output
         if 'group_id' in clean_cbl.columns:
             logger.info("📋 Sorting data to group matched records together...")

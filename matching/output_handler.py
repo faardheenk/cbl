@@ -81,18 +81,29 @@ def _process_group_match(group_cbl_rows, insurer_rows, cbl_cols, insurer_cols):
     """
     combined_rows = []
     max_rows = max(len(group_cbl_rows), len(insurer_rows))
-    
+
+    group_id = None
+    for cbl_row in group_cbl_rows:
+        gid = cbl_row.get('group_id', None)
+        if gid is not None and str(gid).lower() != 'nan' and gid != '':
+            group_id = gid
+            break
+
     for i in range(max_rows):
         # Get CBL row if available, otherwise None
         cbl_row = group_cbl_rows[i] if i < len(group_cbl_rows) else None
-        
+
         # Get insurer row if available, otherwise None
         insurer_row = insurer_rows[i] if i < len(insurer_rows) else None
-        
+
         # Create combined row (handles None for either CBL or insurer)
         combined_row = _create_zipped_row(cbl_row, insurer_row, cbl_cols, insurer_cols)
+
+        if group_id is not None and ('group_id' not in combined_row or combined_row.get('group_id') is None):
+            combined_row['group_id'] = group_id
+
         combined_rows.append(combined_row)
-    
+
     return combined_rows
 
 
@@ -120,48 +131,56 @@ def _process_individual_match(cbl_row, insurer_df, cbl_cols, insurer_cols):
     logger.debug(f"  insurer_df index range: {insurer_df.index.min()} to {insurer_df.index.max()}")
     logger.debug(f"  insurer_df shape: {insurer_df.shape}")
     
+    group_id = cbl_row.get('group_id', None)
+    if group_id is not None and (str(group_id).lower() == 'nan' or group_id == ''):
+        group_id = None
+
     # If no insurer indices, create a row with only CBL data
     if not insurer_indices:
         combined_row = _create_zipped_row(cbl_row, None, cbl_cols, insurer_cols)
         combined_rows.append(combined_row)
         return combined_rows
-    
+
     # DEDUPLICATION: Remove duplicates while preserving order
     # Convert set to list to preserve order, then use dict.fromkeys() to remove duplicates
     unique_indices = list(dict.fromkeys(list(insurer_indices)))
-    
+
     # Log deduplication if it occurred
     if len(unique_indices) < len(insurer_indices):
         duplicates_removed = len(insurer_indices) - len(unique_indices)
         logger.info(f"CBL {cbl_row.name}: Removed {duplicates_removed} duplicate insurer indices. "
                    f"Original: {insurer_indices}, Deduplicated: {unique_indices}")
-    
+
     logger.debug(f"  Processing {len(unique_indices)} unique insurer indices: {unique_indices}")
-    
+
     for i, insurer_idx in enumerate(unique_indices):
         # Validate index exists in insurer_df
         if insurer_idx not in insurer_df.index:
             logger.error(f"CBL {cbl_row.name}: Insurer index {insurer_idx} NOT FOUND in insurer_df!")
             logger.error(f"  Available insurer indices: {list(insurer_df.index[:10])}... (showing first 10)")
             continue
-        
+
         # Get insurer row using DataFrame index directly
         insurer_row = insurer_df.loc[insurer_idx]
-        
+
         # DEBUG: Log insurer information
         insurer_client_name = insurer_row.get('ClientName_INSURER', 'N/A')
         insurer_matrix_key = insurer_row.get('MatrixKey_INSURER', 'N/A')
         logger.debug(f"  [{i}] Fetched insurer {insurer_idx}: ClientName='{insurer_client_name}', MatrixKey='{insurer_matrix_key}'")
-        
+
         # For multiple insurers, only show CBL data in first row
         if i > 0:
             # For subsequent insurer rows, pass None for CBL data to clear MatrixKey
             cbl_row_copy = None
         else:
             cbl_row_copy = cbl_row
-        
+
         # Create combined row
         combined_row = _create_zipped_row(cbl_row_copy, insurer_row, cbl_cols, insurer_cols)
+
+        if i > 0 and group_id is not None:
+            combined_row['group_id'] = group_id
+
         combined_rows.append(combined_row)
     
     logger.debug(f"  Created {len(combined_rows)} combined rows for CBL {cbl_row.name}")

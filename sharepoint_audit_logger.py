@@ -37,7 +37,79 @@ class SharePointAuditLogger:
         self.audit_list_name = audit_list_name
         self.audit_entry = None
         self.start_time = None
+        self.script_audit_entry = None
+        self.script_start_time = None
         
+    def start_script_audit(self):
+        """Create a script-level audit entry that logs every run, even when there is no work."""
+        try:
+            self.script_start_time = datetime.datetime.now()
+            unique_id = f"SCRIPT_RUN_{self.script_start_time.strftime('%Y%m%d_%H%M%S')}"
+
+            audit_data = {
+                'Title': unique_id,
+                'Started_Date': self.script_start_time.isoformat(),
+                'Insurer_Name': '-',
+                'Folder_Id': '-',
+                'File_Names': '[]',
+                'Status': 'Running',
+            }
+
+            self.script_audit_entry = self._create_audit_entry(audit_data)
+            logger.info(f"Started script audit entry {unique_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to start script audit entry: {str(e)}")
+
+    def complete_script_audit(self, folders_found: int = 0, folders_processed: int = 0,
+                              folders_failed: int = 0, error_details: str = None):
+        """Complete the script-level audit entry with a run summary."""
+        if not self.script_audit_entry:
+            return
+
+        try:
+            processing_time = None
+            if self.script_start_time:
+                processing_time = (datetime.datetime.now() - self.script_start_time).total_seconds()
+
+            if error_details:
+                status = 'Failed'
+            elif folders_found == 0:
+                status = 'No Work'
+            elif folders_failed > 0 and folders_processed == 0:
+                status = 'Failed'
+            elif folders_failed > 0:
+                status = 'Partial'
+            else:
+                status = 'Completed'
+
+            summary = {
+                'script_run': True,
+                'folders_found': folders_found,
+                'folders_processed': folders_processed,
+                'folders_failed': folders_failed,
+            }
+
+            update_data = {
+                'Status': status,
+                'Match_Statistics': json.dumps(summary),
+            }
+
+            if processing_time is not None:
+                update_data['Processing_Time'] = processing_time
+
+            if error_details:
+                update_data['Error_Details'] = error_details
+
+            self._update_audit_entry(self.script_audit_entry, update_data)
+            logger.info(f"Completed script audit: {status} (found={folders_found}, processed={folders_processed}, failed={folders_failed})")
+
+        except Exception as e:
+            logger.error(f"Failed to complete script audit entry: {str(e)}")
+        finally:
+            self.script_audit_entry = None
+            self.script_start_time = None
+
     def start_audit_entry(self, folder_id: str, insurer_name: str, file_names: list) -> str:
         """
         Start a new audit entry and return the audit ID.

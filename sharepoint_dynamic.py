@@ -33,18 +33,18 @@ class SharePointService:
     def __init__(self):
         """Initialize SharePoint service with credentials from environment variables."""
         # Load environment variables
-        # if load_dotenv:
-        #     load_dotenv(override=True)
+        if load_dotenv:
+            load_dotenv(override=True)
         
         # Get SharePoint configuration from environment variables
         # self.site_url = os.getenv('SITE_URL')
         # self.client_username = os.getenv('SP_USERNAME')
         # self.client_password = os.getenv('PASSWORD')
-        # self.site_url = os.getenv('SITE_URL')
-        # self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
-        # self.client_id = os.getenv('CLIENT_ID')
-        # self.tenant=os.getenv('TENANT')
-        # self.cert_path=os.getenv('CERT_PATH')
+        self.site_url = os.getenv('SITE_URL')
+        self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
+        self.client_id = os.getenv('CLIENT_ID')
+        self.tenant=os.getenv('TENANT')
+        self.cert_path=os.getenv('CERT_PATH')
 
         # self.site_url = "https://frcidevtest.sharepoint.com/sites/CityBroker2"
         # self.cert_thumbprint = "C8F25C2F82B6F5712662D175C42FDD3E355B953B"
@@ -52,11 +52,11 @@ class SharePointService:
         # self.tenant= "frcidevtest.onmicrosoft.com"
         # self.cert_path= "C:\\Users\\boshavg.SERVICES\\Desktop\\Projects\\CBL\\certificate\\cert.pem"
 
-        self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
-        self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
-        self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
-        self.tenant= "citybrokersltdmu.onmicrosoft.com"
-        self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
+        # self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
+        # self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
+        # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
+        # self.tenant= "citybrokersltdmu.onmicrosoft.com"
+        # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
 
         self.cert_credentials = {
             "tenant": self.tenant,
@@ -661,10 +661,14 @@ class SharePointService:
             raise
 
 def main():
+    sharepoint_service = None
+    folders_found = 0
+    folders_processed = 0
+    folders_failed = 0
     try:
         # Initialize SharePoint service
         sharepoint_service = SharePointService()
-        
+
         # Test connection
         ctx = sharepoint_service.get_client_context()
         logger.info("Successfully connected to SharePoint")
@@ -673,17 +677,21 @@ def main():
         ctx.load(web)
         ctx.execute_query()
         logger.info(f"Connected to SharePoint site: {web.properties['Title']}")
-        
+
         # Ensure Audit Log list exists
         logger.info("🔍 Ensuring Audit Log list exists...")
         if not sharepoint_service.ensure_audit_log_list_exists():
             logger.error("❌ Failed to create or access Audit Log list")
             return
-        
+
+        # Start script-level audit
+        sharepoint_service.audit_logger.start_script_audit()
+
         # Get pending folders
         pending_folders = sharepoint_service.get_pending_folders()
-        logger.info(f"Found {len(pending_folders)} folders with pending status")
-        
+        folders_found = len(pending_folders)
+        logger.info(f"Found {folders_found} folders with pending status")
+
         # Process each pending folder
         for folder in pending_folders:
             logger.info(f"\n🚀 Processing folder: {folder['name']} (Parent: {folder['parent_folder']})")
@@ -793,6 +801,8 @@ def main():
                                     sharepoint_service.update_file_status(file['url'], 'Manual Review')
                                 except Exception as e:
                                     logger.error(f"Error updating file status: {str(e)}")
+
+                            folders_processed += 1
                         else:
                             logger.error(f"❌ Matching process completed but no output file generated")
                             # Complete audit logging with failure
@@ -861,7 +871,9 @@ def main():
                             logger.error(f"Error updating file status to Failed: {str(file_status_error)}")
                     
                     # No cleanup needed - files were processed from memory
-                    
+
+                    folders_failed += 1
+
                     # Continue processing other folders even if this one failed
                     continue
             else:
@@ -873,6 +885,14 @@ def main():
         traceback.print_exc()
         raise
     finally:
+        # Complete script-level audit
+        if sharepoint_service and sharepoint_service.audit_logger.script_audit_entry:
+            sharepoint_service.audit_logger.complete_script_audit(
+                folders_found=folders_found,
+                folders_processed=folders_processed,
+                folders_failed=folders_failed
+            )
+
         # Log script completion
         logger.info(f"\n🏁 Script execution completed at {datetime.datetime.now()}")
         logger.info("📝 All audit logs have been saved to SharePoint Audit Log list")
