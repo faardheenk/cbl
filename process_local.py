@@ -13,19 +13,21 @@ logger = logging.getLogger(__name__)
 def main():
     cbl_path = os.path.join("data", "cbl.xlsx")
     insurer_path = os.path.join("data", "insurer.xlsx")
-    insurer_name = "MEDS EL"
+    insurer_name = "EAGLE"
 
     cbl_custom_mappings = {
-        "Placing No.": "PlacingNo",
+        "Placing/Endorsement No.": "PlacingNo",
         "Policy No.": "PolicyNo",
         "Client Name": "ClientName",
-        "Balance": "ProcessedAmount",
+        "Balance Net of Brokerage": "ProcessedAmount",
     }
 
     insurer_custom_mappings = {
-        "POLICY_NO": "PolicyNo_1",
-        "POLICY_NAME": "ClientName",
-        "Debtors": "ProcessedAmount",
+        "Doc Ref": "PolicyNo_1",
+        "Policy Number": "PolicyNo_2",
+        "Insured Name": "ClientName",
+        "Placing No.": "PlacingNo",
+        "O/S Amount": "ProcessedAmount",
     }
 
     with open(cbl_path, "rb") as f:
