@@ -135,51 +135,64 @@ def read_match_history(history_source) -> list:
 
     logger.info(f"[HISTORY] MatchHistory sheet has {len(df)} rows, columns: {list(df.columns)}")
 
+    # JSON array fields that can be split across continuation rows
+    _ARRAY_FIELDS = [
+        ("CblFingerprints", "cbl_fingerprints"),
+        ("InsurerFingerprints", "insurer_fingerprints"),
+        ("CblRemarks", "cbl_remarks"),
+        ("InsurerRemarks", "insurer_remarks"),
+        ("TargetCblFingerprints", "target_cbl_fingerprints"),
+        ("TargetInsurerFingerprints", "target_insurer_fingerprints"),
+        ("OrphanedCblFingerprints", "orphaned_cbl_fingerprints"),
+        ("OrphanedInsurerFingerprints", "orphaned_insurer_fingerprints"),
+    ]
+
+    def _parse_json_array(row, col_name):
+        try:
+            return json.loads(row[col_name]) if pd.notna(row.get(col_name)) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
     entries = []
+    current_entry = None
+    entry_idx = -1
+
     for i, (_, row) in enumerate(df.iterrows()):
+        action_type = str(row.get("ActionType", "move")).strip().lower() if pd.notna(row.get("ActionType")) else "move"
+
+        if action_type == "continuation":
+            if current_entry is None:
+                logger.warning(f"[HISTORY] Row #{i} is a continuation with no preceding entry — skipping")
+                continue
+
+            for excel_col, key in _ARRAY_FIELDS:
+                current_entry[key] += _parse_json_array(row, excel_col)
+
+            logger.info(f"[HISTORY] Row #{i} continuation merged into entry #{entry_idx}")
+            continue
+
+        # New entry — flush previous
+        if current_entry is not None:
+            entries.append(current_entry)
+
+        entry_idx += 1
+
         try:
             cbl_fps = json.loads(row["CblFingerprints"]) if pd.notna(row.get("CblFingerprints")) else []
             ins_fps = json.loads(row["InsurerFingerprints"]) if pd.notna(row.get("InsurerFingerprints")) else []
         except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"[HISTORY] Skipping malformed history entry #{i}: {e}")
+            logger.warning(f"[HISTORY] Skipping malformed history entry #{entry_idx}: {e}")
+            current_entry = None
             continue
 
-        # Parse optional remarks arrays (parallel to fingerprint arrays)
-        try:
-            cbl_remarks = json.loads(row["CblRemarks"]) if pd.notna(row.get("CblRemarks")) else []
-        except (json.JSONDecodeError, TypeError):
-            cbl_remarks = []
-        try:
-            ins_remarks = json.loads(row["InsurerRemarks"]) if pd.notna(row.get("InsurerRemarks")) else []
-        except (json.JSONDecodeError, TypeError):
-            ins_remarks = []
+        cbl_remarks = _parse_json_array(row, "CblRemarks")
+        ins_remarks = _parse_json_array(row, "InsurerRemarks")
+        target_cbl_fps = _parse_json_array(row, "TargetCblFingerprints")
+        target_ins_fps = _parse_json_array(row, "TargetInsurerFingerprints")
+        orphaned_cbl_fps = _parse_json_array(row, "OrphanedCblFingerprints")
+        orphaned_ins_fps = _parse_json_array(row, "OrphanedInsurerFingerprints")
 
-        action_type = str(row.get("ActionType", "move")).strip().lower() if pd.notna(row.get("ActionType")) else "move"
-
-        # Parse regroup-specific fingerprint fields
-        target_cbl_fps = []
-        target_ins_fps = []
-        orphaned_cbl_fps = []
-        orphaned_ins_fps = []
-        if action_type == "regroup":
-            try:
-                target_cbl_fps = json.loads(row["TargetCblFingerprints"]) if pd.notna(row.get("TargetCblFingerprints")) else []
-            except (json.JSONDecodeError, TypeError):
-                target_cbl_fps = []
-            try:
-                target_ins_fps = json.loads(row["TargetInsurerFingerprints"]) if pd.notna(row.get("TargetInsurerFingerprints")) else []
-            except (json.JSONDecodeError, TypeError):
-                target_ins_fps = []
-            try:
-                orphaned_cbl_fps = json.loads(row["OrphanedCblFingerprints"]) if pd.notna(row.get("OrphanedCblFingerprints")) else []
-            except (json.JSONDecodeError, TypeError):
-                orphaned_cbl_fps = []
-            try:
-                orphaned_ins_fps = json.loads(row["OrphanedInsurerFingerprints"]) if pd.notna(row.get("OrphanedInsurerFingerprints")) else []
-            except (json.JSONDecodeError, TypeError):
-                orphaned_ins_fps = []
-
-        entry = {
+        current_entry = {
             "action_type": action_type,
             "cbl_fingerprints": cbl_fps,
             "insurer_fingerprints": ins_fps,
@@ -193,9 +206,8 @@ def read_match_history(history_source) -> list:
             "orphaned_cbl_fingerprints": orphaned_cbl_fps,
             "orphaned_insurer_fingerprints": orphaned_ins_fps,
         }
-        entries.append(entry)
 
-        logger.info(f"[HISTORY] Entry #{i} ({action_type}): from='{entry['from_bucket']}' -> target='{entry['target_bucket']}' | "
+        logger.info(f"[HISTORY] Entry #{entry_idx} ({action_type}): from='{current_entry['from_bucket']}' -> target='{current_entry['target_bucket']}' | "
                      f"CBL fps={len(cbl_fps)}, Insurer fps={len(ins_fps)}")
         if cbl_fps:
             preview = cbl_fps[0][:80] + "..." if len(cbl_fps[0]) > 80 else cbl_fps[0]
@@ -206,6 +218,10 @@ def read_match_history(history_source) -> list:
         if action_type == "regroup":
             logger.info(f"[HISTORY]   Regroup target CBL fps={len(target_cbl_fps)}, target Insurer fps={len(target_ins_fps)}, "
                          f"orphaned CBL fps={len(orphaned_cbl_fps)}, orphaned Insurer fps={len(orphaned_ins_fps)}")
+
+    # Flush the last entry
+    if current_entry is not None:
+        entries.append(current_entry)
 
     return entries
 

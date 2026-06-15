@@ -190,44 +190,48 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
 def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets=None):
     """Generate output files and calculate statistics."""
 
-    # Track insurer indices by match type
-    exact_match_insurer_indices = set()
-    partial_match_insurer_indices = set()
+    dynamic_bucket_keys = {bucket["BucketKey"] for bucket in (dynamic_buckets or [])}
 
-    # Collect insurer indices from exact matches
-    for indices in clean_cbl[clean_cbl["match_status"] == "Exact Match"]["matched_insurer_indices"]:
-        if isinstance(indices, list):
-            exact_match_insurer_indices.update(indices)
-        elif pd.notna(indices):
-            exact_match_insurer_indices.add(indices)
-    
-    # Collect insurer indices from partial matches
-    for indices in clean_cbl[clean_cbl["match_status"] == "Partial Match"]["matched_insurer_indices"]:
-        if isinstance(indices, list):
-            partial_match_insurer_indices.update(indices)
-        elif pd.notna(indices):
-            partial_match_insurer_indices.add(indices)
+    def _collect_insurer_indices_for_statuses(statuses):
+        insurer_indices = set()
+        matched_rows = clean_cbl[clean_cbl["match_status"].isin(statuses)]
+        for indices in matched_rows["matched_insurer_indices"]:
+            if isinstance(indices, list):
+                insurer_indices.update(indices)
+            elif pd.notna(indices):
+                insurer_indices.add(indices)
+        return insurer_indices
+
+    # Track insurer indices by match type.
+    # Dynamic bucket rows are placed rows too, so their insurer links must not
+    # fall through into the No Matches Insurer sheet.
+    exact_match_insurer_indices = _collect_insurer_indices_for_statuses({"Exact Match"})
+    partial_match_insurer_indices = _collect_insurer_indices_for_statuses({"Partial Match"})
+    dynamic_bucket_insurer_indices = _collect_insurer_indices_for_statuses(dynamic_bucket_keys)
 
     # Remove exact matches from partial matches to avoid double counting
     partial_match_insurer_indices = partial_match_insurer_indices - exact_match_insurer_indices
+    dynamic_bucket_insurer_indices = dynamic_bucket_insurer_indices - exact_match_insurer_indices - partial_match_insurer_indices
 
     # Calculate unmatched insurer indices BEFORE resetting index
     all_insurer_indices = set(clean_insurer.index)
-    matched_insurer_indices = exact_match_insurer_indices | partial_match_insurer_indices
+    matched_insurer_indices = exact_match_insurer_indices | partial_match_insurer_indices | dynamic_bucket_insurer_indices
     unmatched_insurer_indices = all_insurer_indices - matched_insurer_indices
 
     # Calculate statistics BEFORE resetting index
     total_insurer_rows = len(clean_insurer)
     exact_match_insurer_count = len(exact_match_insurer_indices)
     partial_match_insurer_count = len(partial_match_insurer_indices)
+    dynamic_bucket_insurer_count = len(dynamic_bucket_insurer_indices)
     unmatched_insurer_count = len(unmatched_insurer_indices)
     
     logger.info(f"DEBUG: Statistics BEFORE reset_index:")
     logger.info(f"  - Total insurer rows: {total_insurer_rows}")
     logger.info(f"  - Exact match insurer indices: {exact_match_insurer_count}")
     logger.info(f"  - Partial match insurer indices: {partial_match_insurer_count}")
+    logger.info(f"  - Dynamic bucket insurer indices: {dynamic_bucket_insurer_count}")
     logger.info(f"  - Unmatched insurer indices: {unmatched_insurer_count}")
-    logger.info(f"  - Sum of all categories: {exact_match_insurer_count + partial_match_insurer_count + unmatched_insurer_count}")
+    logger.info(f"  - Sum of all categories: {exact_match_insurer_count + partial_match_insurer_count + dynamic_bucket_insurer_count + unmatched_insurer_count}")
 
     # Split clean_cbls by individual match_status
     logger.info("\n=== Splitting CBL records by match status ===")
@@ -260,8 +264,8 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
             indices = row.get("matched_insurer_indices", [])
             if not isinstance(indices, list):
                 indices = [indices]
-            # remove any indices that are in exact_match_insurer_indices
-            filtered = [idx for idx in indices if idx not in exact_match_insurer_indices]
+            # remove any indices that are already placed in exact or dynamic buckets
+            filtered = [idx for idx in indices if idx not in exact_match_insurer_indices and idx not in dynamic_bucket_insurer_indices]
             return filtered
 
         partial_matches = partial_matches.copy()
@@ -310,31 +314,20 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
         current_insurer_indices = set(clean_insurer.index)
         
         # Recalculate matched indices based on current DataFrame state
-        # Use the original approach but with current DataFrame
-        current_exact_match_indices = set()
-        current_partial_match_indices = set()
-        
-        # Collect insurer indices from exact matches in the current CBL DataFrame
-        exact_match_cbl = clean_cbl[clean_cbl["match_status"] == "Exact Match"]
-        for indices in exact_match_cbl["matched_insurer_indices"]:
-            if isinstance(indices, list):
-                current_exact_match_indices.update(indices)
-            elif pd.notna(indices):
-                current_exact_match_indices.add(indices)
-        
-        # Collect insurer indices from partial matches in the current CBL DataFrame
-        partial_match_cbl = clean_cbl[clean_cbl["match_status"] == "Partial Match"]
-        for indices in partial_match_cbl["matched_insurer_indices"]:
-            if isinstance(indices, list):
-                current_partial_match_indices.update(indices)
-            elif pd.notna(indices):
-                current_partial_match_indices.add(indices)
+        current_exact_match_indices = _collect_insurer_indices_for_statuses({"Exact Match"})
+        current_partial_match_indices = _collect_insurer_indices_for_statuses({"Partial Match"})
+        current_dynamic_bucket_indices = _collect_insurer_indices_for_statuses(dynamic_bucket_keys)
         
         # Remove exact matches from partial matches to avoid double counting
         current_partial_match_indices = current_partial_match_indices - current_exact_match_indices
+        current_dynamic_bucket_indices = (
+            current_dynamic_bucket_indices
+            - current_exact_match_indices
+            - current_partial_match_indices
+        )
         
         # Calculate current matched and unmatched indices
-        current_matched_indices = current_exact_match_indices | current_partial_match_indices
+        current_matched_indices = current_exact_match_indices | current_partial_match_indices | current_dynamic_bucket_indices
         current_unmatched_indices = current_insurer_indices - current_matched_indices
         
         logger.info(f"Index reconciliation:")
@@ -342,6 +335,7 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
         logger.info(f"  - Current DataFrame indices: {len(current_insurer_indices)}")
         logger.info(f"  - Current exact match indices: {len(current_exact_match_indices)}")
         logger.info(f"  - Current partial match indices: {len(current_partial_match_indices)}")
+        logger.info(f"  - Current dynamic bucket indices: {len(current_dynamic_bucket_indices)}")
         logger.info(f"  - Current matched indices: {len(current_matched_indices)}")
         logger.info(f"  - Current unmatched indices: {len(current_unmatched_indices)}")
         
@@ -417,11 +411,14 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
     logger.info(f"  - Total CBL rows: {len(clean_cbl)}")
     logger.info(f"  - Exact matches: {len(clean_cbl[clean_cbl['match_status'] == 'Exact Match'])}")
     logger.info(f"  - Partial matches: {len(clean_cbl[clean_cbl['match_status'] == 'Partial Match'])}")
+    for key in dynamic_bucket_keys:
+        logger.info(f"  - {key}: {len(clean_cbl[clean_cbl['match_status'] == key])}")
     logger.info(f"  - No matches: {len(clean_cbl[clean_cbl['match_status'] == 'No Match'])}")
     logger.info(f"✓ Insurer Records:")
     logger.info(f"  - Total insurer rows: {total_insurer_rows}")
     logger.info(f"  - Exact match insurer rows: {exact_match_insurer_count} ({exact_match_insurer_count/total_insurer_rows*100:.1f}%)")
     logger.info(f"  - Partial match insurer rows: {partial_match_insurer_count} ({partial_match_insurer_count/total_insurer_rows*100:.1f}%)")
+    logger.info(f"  - Dynamic bucket insurer rows: {dynamic_bucket_insurer_count} ({dynamic_bucket_insurer_count/total_insurer_rows*100:.1f}%)")
     logger.info(f"  - Unmatched insurer rows: {unmatched_insurer_count} ({unmatched_insurer_count/total_insurer_rows*100:.1f}%)")
     logger.info(f"✓ Results generated in memory: {output_filename}")
 
@@ -443,6 +440,12 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
     except Exception as e:
         logger.error(f"Error calculating partial match insurer amount: {str(e)}")
         partial_match_insurer_amount = 0
+
+    try:
+        dynamic_bucket_insurer_amount = pd.to_numeric(clean_insurer.loc[list(dynamic_bucket_insurer_indices), 'ProcessedAmount_INSURER'], errors='coerce').sum()
+    except Exception as e:
+        logger.error(f"Error calculating dynamic bucket insurer amount: {str(e)}")
+        dynamic_bucket_insurer_amount = 0
     
     try:
         # Use the current unmatched indices instead of the original ones
@@ -477,12 +480,15 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
             'total_rows': total_insurer_rows,
             'exact_match_rows': exact_match_insurer_count,
             'partial_match_rows': partial_match_insurer_count,
+            'dynamic_bucket_rows': dynamic_bucket_insurer_count,
             'unmatched_rows': unmatched_insurer_count,
             'exact_match_rate': exact_match_insurer_count/total_insurer_rows*100,
             'partial_match_rate': partial_match_insurer_count/total_insurer_rows*100,
+            'dynamic_bucket_rate': dynamic_bucket_insurer_count/total_insurer_rows*100,
             'unmatched_rate': unmatched_insurer_count/total_insurer_rows*100,
             'exact_match_amount': exact_match_insurer_amount,
             'partial_match_amount': partial_match_insurer_amount,
+            'dynamic_bucket_amount': dynamic_bucket_insurer_amount,
             'unmatched_amount': unmatched_insurer_amount
         },
         'dynamic_bucket_stats': {
