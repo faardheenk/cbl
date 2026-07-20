@@ -293,11 +293,16 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
 
     # Build set of valid target bucket keys (fixed + dynamic)
     dynamic_bucket_keys = set()
+    rematch_bucket_keys = set()
     if dynamic_buckets:
         dynamic_bucket_keys = {b["BucketKey"] for b in dynamic_buckets}
+        rematch_bucket_keys = {b["BucketKey"] for b in dynamic_buckets if b.get("Rematch", False)}
         for key in dynamic_bucket_keys:
             summary[key] = 0
     valid_targets = {"exact", "partial", "no-match"} | dynamic_bucket_keys
+
+    rematch_stash = []
+    insurer_only_placements = {}  # bucket_key -> set of insurer indices (insurer-only moves)
 
     for entry_idx, entry in enumerate(history):
         target = entry["target_bucket"]
@@ -481,6 +486,29 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
 
         # ─── MOVE: standard bucket pre-placement ────────────────────────
         if target in ("exact", "partial") or target in dynamic_bucket_keys:
+            # Rematchable buckets: stash rows for re-matching instead of pre-placing
+            if target in rematch_bucket_keys:
+                rematch_stash.append({
+                    "target_bucket": target,
+                    "cbl_indices": list(entry_cbl_indices),
+                    "insurer_indices": list(entry_insurer_indices),
+                })
+                for cbl_idx in entry_cbl_indices:
+                    claimed_cbl.discard(cbl_idx)
+                for ins_idx in entry_insurer_indices:
+                    claimed_insurer.discard(ins_idx)
+                logger.info(f"[HISTORY] Stashed {len(entry_cbl_indices)} CBL + {len(entry_insurer_indices)} insurer rows for re-matching (bucket={target})")
+                summary[target] += len(entry_cbl_indices)
+                continue
+
+            # Insurer-only move (no CBL rows) to a dynamic bucket
+            if not entry_cbl_indices and entry_insurer_indices and target in dynamic_bucket_keys:
+                insurer_only_placements.setdefault(target, set()).update(entry_insurer_indices)
+                if global_tracker:
+                    global_tracker.mark_matrix_used(entry_insurer_indices)
+                logger.info(f"[HISTORY] Insurer-only placement: {len(entry_insurer_indices)} insurer rows -> {target}")
+                continue
+
             if target == "exact":
                 match_status = "Exact Match"
             elif target == "partial":
@@ -522,21 +550,28 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
 
     # --- Summary ---
     total = sum(summary.values())
+    rematch_cbl_count = sum(len(s["cbl_indices"]) for s in rematch_stash)
+    insurer_only_count = sum(len(v) for v in insurer_only_placements.values())
     logger.info(f"[HISTORY] ========== MATCH HISTORY SUMMARY ==========")
     logger.info(f"[HISTORY] Exact:    {summary['exact']} CBL rows pre-placed")
     logger.info(f"[HISTORY] Partial:  {summary['partial']} CBL rows pre-placed")
     logger.info(f"[HISTORY] No Match: {summary['no-match']} CBL rows pre-placed")
     for key in dynamic_bucket_keys:
         if summary.get(key, 0) > 0:
-            logger.info(f"[HISTORY] {key}: {summary[key]} CBL rows pre-placed")
-    logger.info(f"[HISTORY] Total:    {total} CBL rows pre-placed out of {len(cbl_df)}")
-    if total == 0:
+            label = f"{key} (rematch)" if key in rematch_bucket_keys else key
+            logger.info(f"[HISTORY] {label}: {summary[key]} CBL rows — {'stashed for re-matching' if key in rematch_bucket_keys else 'pre-placed'}")
+        if key in insurer_only_placements:
+            logger.info(f"[HISTORY] {key}: {len(insurer_only_placements[key])} insurer-only rows placed")
+    logger.info(f"[HISTORY] Total:    {total} CBL rows processed ({rematch_cbl_count} stashed for re-matching)")
+    if insurer_only_count:
+        logger.info(f"[HISTORY] Insurer-only placements: {insurer_only_count} insurer rows across {len(insurer_only_placements)} bucket(s)")
+    if total == 0 and insurer_only_count == 0:
         logger.info("[HISTORY] No fingerprint matches found — all rows will go through normal comparison")
         logger.info("[HISTORY] This means the fingerprints from history.xlsx do NOT match any regenerated fingerprints.")
         logger.info("[HISTORY] Check that the frontend and backend use the same exclude list and value formatting.")
     logger.info(f"[HISTORY] =============================================")
 
-    return cbl_df, insurer_df, summary
+    return cbl_df, insurer_df, summary, rematch_stash, insurer_only_placements
 
 
 def finalize_history_no_match(cbl_df):
@@ -578,4 +613,56 @@ def finalize_history_dynamic_buckets(cbl_df):
             DYNAMIC_BUCKET_SENTINEL_PREFIX, "", n=1
         )
         logger.info(f"Finalized {count} history dynamic-bucket rows")
+    return cbl_df
+
+
+def finalize_rematch_buckets(cbl_df, rematch_stash):
+    """
+    Place stashed rematch rows back into their original dynamic bucket
+    if the matching passes did not match them.
+
+    Rows that were matched by a pass (match_status != 'No Match') are left
+    where the pass put them. Rows still unmatched are returned to their
+    original bucket so the user sees them in the same place as before.
+
+    Must be called after all matching passes and after finalize_history_no_match.
+
+    Args:
+        cbl_df: CBL DataFrame after all passes have run.
+        rematch_stash: list of dicts from apply_match_history, each with
+            target_bucket, cbl_indices, insurer_indices.
+
+    Returns:
+        cbl_df: Updated DataFrame.
+    """
+    if not rematch_stash:
+        return cbl_df
+
+    matched_by_pass = 0
+    returned_to_bucket = 0
+
+    for stash_entry in rematch_stash:
+        target = stash_entry["target_bucket"]
+        cbl_indices = stash_entry["cbl_indices"]
+        insurer_indices = stash_entry["insurer_indices"]
+
+        for cbl_idx in cbl_indices:
+            current_status = cbl_df.at[cbl_idx, "match_status"]
+            if current_status == "No Match":
+                cbl_df.at[cbl_idx, "match_status"] = target
+                cbl_df.at[cbl_idx, "matched_insurer_indices"] = list(insurer_indices)
+                cbl_df.at[cbl_idx, "match_reason"] = f"History rematch fallback ({target})"
+                cbl_df.at[cbl_idx, "match_pass"] = ["history-rematch"]
+                cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "history-rematch"
+                returned_to_bucket += 1
+                logger.info(f"[REMATCH] CBL idx={cbl_idx} still unmatched — returned to bucket '{target}'")
+            else:
+                matched_by_pass += 1
+                logger.info(f"[REMATCH] CBL idx={cbl_idx} matched by pass (status='{current_status}') — keeping")
+
+    logger.info(f"[REMATCH] ========== REMATCH SUMMARY ==========")
+    logger.info(f"[REMATCH] Matched by passes:    {matched_by_pass}")
+    logger.info(f"[REMATCH] Returned to bucket:   {returned_to_bucket}")
+    logger.info(f"[REMATCH] ==========================================")
+
     return cbl_df

@@ -5,7 +5,7 @@ import logging
 import os
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import GlobalMatchTracker
-from .match_history import apply_match_history, finalize_history_no_match, finalize_history_dynamic_buckets, generate_fingerprints_for_df
+from .match_history import apply_match_history, finalize_history_no_match, finalize_history_dynamic_buckets, finalize_rematch_buckets, generate_fingerprints_for_df
 from .pass1 import pass1
 from .pass2 import pass2
 from .pass3 import pass3
@@ -85,12 +85,20 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # Pre-place rows based on previous manual user moves (before any passes).
         # Rows that match history fingerprints are placed directly into their
         # target buckets; the remaining rows proceed through normal comparison.
+        # Rows in rematchable buckets are stashed and left unmatched so passes
+        # can try to match them against new data first.
+        rematch_stash = []
+        insurer_only_placements = {}
         if history_file is not None:
             logger.info(f"[HISTORY] History file provided — running match history layer")
-            clean_cbl, clean_insurer, history_summary = apply_match_history(
+            clean_cbl, clean_insurer, history_summary, rematch_stash, insurer_only_placements = apply_match_history(
                 clean_cbl, clean_insurer, history_file, global_tracker, dynamic_buckets
             )
             logger.info(f"[HISTORY] After History Layer: {global_tracker.get_usage_summary()}")
+            if rematch_stash:
+                logger.info(f"[HISTORY] {sum(len(s['cbl_indices']) for s in rematch_stash)} CBL rows stashed for re-matching")
+            if insurer_only_placements:
+                logger.info(f"[HISTORY] {sum(len(v) for v in insurer_only_placements.values())} insurer-only rows placed into dynamic buckets")
         else:
             logger.info("[HISTORY] No history file provided — skipping match history layer")
 
@@ -150,6 +158,7 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # now that all passes are done and won't touch these rows.
         if history_file is not None:
             clean_cbl = finalize_history_no_match(clean_cbl)
+            clean_cbl = finalize_rematch_buckets(clean_cbl, rematch_stash)
             clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
 
         # ── Assign group_id to all matched rows ─────────────────────
@@ -180,17 +189,18 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
             clean_cbl = clean_cbl.reset_index(drop=True)
 
         # Generate output and statistics
-        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets)
+        return _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets, insurer_only_placements)
 
     except Exception as e:
         logger.error(f"\nError: {str(e)}")
         raise
 
 
-def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets=None):
+def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, dynamic_buckets=None, insurer_only_placements=None):
     """Generate output files and calculate statistics."""
 
     dynamic_bucket_keys = {bucket["BucketKey"] for bucket in (dynamic_buckets or [])}
+    insurer_only_placements = insurer_only_placements or {}
 
     def _collect_insurer_indices_for_statuses(statuses):
         insurer_indices = set()
@@ -208,6 +218,12 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
     exact_match_insurer_indices = _collect_insurer_indices_for_statuses({"Exact Match"})
     partial_match_insurer_indices = _collect_insurer_indices_for_statuses({"Partial Match"})
     dynamic_bucket_insurer_indices = _collect_insurer_indices_for_statuses(dynamic_bucket_keys)
+
+    # Include insurer-only placements (insurer rows moved to dynamic buckets with no CBL counterpart)
+    all_insurer_only = set()
+    for indices in insurer_only_placements.values():
+        all_insurer_only.update(indices)
+    dynamic_bucket_insurer_indices = dynamic_bucket_insurer_indices | all_insurer_only
 
     # Remove exact matches from partial matches to avoid double counting
     partial_match_insurer_indices = partial_match_insurer_indices - exact_match_insurer_indices
@@ -317,7 +333,11 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
         current_exact_match_indices = _collect_insurer_indices_for_statuses({"Exact Match"})
         current_partial_match_indices = _collect_insurer_indices_for_statuses({"Partial Match"})
         current_dynamic_bucket_indices = _collect_insurer_indices_for_statuses(dynamic_bucket_keys)
-        
+
+        # Include insurer-only placements
+        for indices in insurer_only_placements.values():
+            current_dynamic_bucket_indices.update(indices)
+
         # Remove exact matches from partial matches to avoid double counting
         current_partial_match_indices = current_partial_match_indices - current_exact_match_indices
         current_dynamic_bucket_indices = (
@@ -325,7 +345,7 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
             - current_exact_match_indices
             - current_partial_match_indices
         )
-        
+
         # Calculate current matched and unmatched indices
         current_matched_indices = current_exact_match_indices | current_partial_match_indices | current_dynamic_bucket_indices
         current_unmatched_indices = current_insurer_indices - current_matched_indices
@@ -382,11 +402,21 @@ def _generate_output_and_statistics(clean_cbl, clean_insurer, output_filename, d
                 for bucket in dynamic_buckets:
                     key = bucket["BucketKey"]
                     bucket_rows = dynamic_bucket_dfs.get(key, pd.DataFrame())
+                    insurer_only_indices = insurer_only_placements.get(key, set())
+
+                    parts = []
                     if not bucket_rows.empty:
-                        bucket_merged = explode_and_merge(bucket_rows, clean_insurer)
-                        bucket_merged.to_excel(writer, sheet_name=key, index=False)
+                        parts.append(explode_and_merge(bucket_rows, clean_insurer))
+                    if insurer_only_indices:
+                        valid_indices = [i for i in insurer_only_indices if i in clean_insurer.index]
+                        if valid_indices:
+                            parts.append(clean_insurer.loc[valid_indices].copy())
+                            logger.info(f"[HISTORY] Added {len(valid_indices)} insurer-only rows to bucket sheet '{key}'")
+
+                    if parts:
+                        combined = pd.concat(parts, ignore_index=True)
+                        combined.to_excel(writer, sheet_name=key, index=False)
                     else:
-                        # Write empty sheet with headers so frontend knows the bucket exists
                         pd.DataFrame(columns=exact_matches.columns).to_excel(
                             writer, sheet_name=key, index=False
                         )

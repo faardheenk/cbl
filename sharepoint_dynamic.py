@@ -40,11 +40,11 @@ class SharePointService:
         # self.site_url = os.getenv('SITE_URL')
         # self.client_username = os.getenv('SP_USERNAME')
         # self.client_password = os.getenv('PASSWORD')
-        self.site_url = os.getenv('SITE_URL')
-        self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
-        self.client_id = os.getenv('CLIENT_ID')
-        self.tenant=os.getenv('TENANT')
-        self.cert_path=os.getenv('CERT_PATH')
+        # self.site_url = os.getenv('SITE_URL')
+        # self.cert_thumbprint = os.getenv('CERT_THUMBPRINT')
+        # self.client_id = os.getenv('CLIENT_ID')
+        # self.tenant=os.getenv('TENANT')
+        # self.cert_path=os.getenv('CERT_PATH')
 
         # self.site_url = "https://frcidevtest.sharepoint.com/sites/CityBroker2"
         # self.cert_thumbprint = "C8F25C2F82B6F5712662D175C42FDD3E355B953B"
@@ -52,11 +52,11 @@ class SharePointService:
         # self.tenant= "frcidevtest.onmicrosoft.com"
         # self.cert_path= "C:\\Users\\boshavg.SERVICES\\Desktop\\Projects\\CBL\\certificate\\cert.pem"
 
-        # self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
-        # self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
-        # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
-        # self.tenant= "citybrokersltdmu.onmicrosoft.com"
-        # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
+        self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
+        self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
+        self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
+        self.tenant= "citybrokersltdmu.onmicrosoft.com"
+        self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
 
         self.cert_credentials = {
             "tenant": self.tenant,
@@ -236,17 +236,20 @@ class SharePointService:
             ctx = self.get_client_context()
             bucket_list = ctx.web.lists.get_by_title("Buckets")
             items = bucket_list.items.select(
-                ['BucketName', 'BucketKey']
+                ['BucketName', 'BucketKey', 'Rematch']
             ).get().execute_query()
 
             buckets = []
             for item in items:
                 bucket_name = item.properties.get('BucketName', '')
                 bucket_key = item.properties.get('BucketKey', '')
+                rematch_raw = item.properties.get('Rematch', False)
+                rematch = rematch_raw is True or str(rematch_raw).strip().lower() in ('yes', 'true', '1')
                 if bucket_name and bucket_key:
                     buckets.append({
                         'BucketName': bucket_name,
                         'BucketKey': bucket_key,
+                        'Rematch': rematch,
                     })
 
             logger.info(f"[BUCKETS] Fetched {len(buckets)} dynamic buckets: {[b['BucketKey'] for b in buckets]}")
