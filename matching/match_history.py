@@ -240,13 +240,13 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
         dynamic_buckets: list of {"BucketName": str, "BucketKey": str} or None.
 
     Returns:
-        tuple: (cbl_df, insurer_df, summary_dict)
+        tuple: (cbl_df, insurer_df, summary_dict, rematch_stash, insurer_only_placements)
     """
     history = read_match_history(history_source)
 
     if not history:
         logger.info("[HISTORY] No match history found — skipping pre-placement")
-        return cbl_df, insurer_df, {"exact": 0, "partial": 0, "no-match": 0}
+        return cbl_df, insurer_df, {"exact": 0, "partial": 0, "no-match": 0}, [], {}
 
     logger.info(f"[HISTORY] Found {len(history)} history entries — using canonical fingerprints...")
 
@@ -486,6 +486,15 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
 
         # ─── MOVE: standard bucket pre-placement ────────────────────────
         if target in ("exact", "partial") or target in dynamic_bucket_keys:
+            # Insurer-only move (no CBL rows) to a dynamic bucket — always place
+            # directly, even for rematchable buckets (re-matching is CBL-centric)
+            if not entry_cbl_indices and entry_insurer_indices and target in dynamic_bucket_keys:
+                insurer_only_placements.setdefault(target, set()).update(entry_insurer_indices)
+                if global_tracker:
+                    global_tracker.mark_matrix_used(entry_insurer_indices)
+                logger.info(f"[HISTORY] Insurer-only placement: {len(entry_insurer_indices)} insurer rows -> {target}")
+                continue
+
             # Rematchable buckets: stash rows for re-matching instead of pre-placing
             if target in rematch_bucket_keys:
                 rematch_stash.append({
@@ -499,14 +508,6 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
                     claimed_insurer.discard(ins_idx)
                 logger.info(f"[HISTORY] Stashed {len(entry_cbl_indices)} CBL + {len(entry_insurer_indices)} insurer rows for re-matching (bucket={target})")
                 summary[target] += len(entry_cbl_indices)
-                continue
-
-            # Insurer-only move (no CBL rows) to a dynamic bucket
-            if not entry_cbl_indices and entry_insurer_indices and target in dynamic_bucket_keys:
-                insurer_only_placements.setdefault(target, set()).update(entry_insurer_indices)
-                if global_tracker:
-                    global_tracker.mark_matrix_used(entry_insurer_indices)
-                logger.info(f"[HISTORY] Insurer-only placement: {len(entry_insurer_indices)} insurer rows -> {target}")
                 continue
 
             if target == "exact":

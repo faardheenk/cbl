@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 def main():
     cbl_path = os.path.join("data", "cbl.xlsx")
     insurer_path = os.path.join("data", "insurer.xlsx")
-    insurer_name = "EAGLE"
+    history_path = os.path.join("data", "history.xlsx")
+    insurer_name = "JUBILEE"
 
     cbl_custom_mappings = {
         "Placing/Endorsement No.": "PlacingNo",
@@ -23,17 +24,33 @@ def main():
     }
 
     insurer_custom_mappings = {
-        "Doc Ref": "PolicyNo_1",
-        "Policy Number": "PolicyNo_2",
+        "Policy No": "PolicyNo_1",
         "Insured Name": "ClientName",
-        "Placing No.": "PlacingNo",
-        "O/S Amount": "ProcessedAmount",
+        "Total": "ProcessedAmount",
+        "Broker Reference": "PlacingNo",
     }
+
+    dynamic_buckets = [
+        {"BucketName": "Timing Differences", "BucketKey": "timing_differences", "Rematch": True},
+        {"BucketName": "Allocation Issues", "BucketKey": "allocation_issues", "Rematch": False},
+        {"BucketName": "Correction to be done by CBL", "BucketKey": "correction_to_be_done_by_cbl", "Rematch": False},
+        {"BucketName": "Correction to be done by insurer", "BucketKey": "correction_to_be_done_by_insurer", "Rematch": False},
+        {"BucketName": "Mise en demeure", "BucketKey": "mise_en_demeure", "Rematch": False},
+        {"BucketName": "Miscellaneous", "BucketKey": "miscellaneous", "Rematch": False},
+    ]
 
     with open(cbl_path, "rb") as f:
         cbl_content = f.read()
     with open(insurer_path, "rb") as f:
         insurer_content = f.read()
+
+    history_content = None
+    if os.path.exists(history_path):
+        with open(history_path, "rb") as f:
+            history_content = f.read()
+        logger.info(f"History file loaded: {history_path}")
+    else:
+        logger.info(f"No history file found at {history_path} — skipping")
 
     cbl_df = read_excel_with_smart_headers(cbl_content)
     insurer_df = read_excel_with_smart_headers(insurer_content)
@@ -58,9 +75,11 @@ def main():
         cbl_file=cbl_content,
         insurer_file=insurer_content,
         output_file=f"{insurer_name}_output.xlsx",
+        history_file=history_content,
+        dynamic_buckets=dynamic_buckets,
     )
 
-    output_path = os.path.join("data", f"{insurer_name}_output.xlsx")
+    output_path = os.path.join("data", "output.xlsx")
     with open(output_path, "wb") as f:
         f.write(result["output_content"])
 
