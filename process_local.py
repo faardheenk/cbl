@@ -14,7 +14,7 @@ def main():
     cbl_path = os.path.join("data", "cbl.xlsx")
     insurer_path = os.path.join("data", "insurer.xlsx")
     history_path = os.path.join("data", "history.xlsx")
-    insurer_name = "JUBILEE"
+    insurer_name = "MUA"
 
     cbl_custom_mappings = {
         "Placing/Endorsement No.": "PlacingNo",
@@ -24,10 +24,10 @@ def main():
     }
 
     insurer_custom_mappings = {
-        "Policy No": "PolicyNo_1",
-        "Insured Name": "ClientName",
-        "Total": "ProcessedAmount",
-        "Broker Reference": "PlacingNo",
+        "Amount (Balance)": "ProcessedAmount",
+        "Underwriting  (Reference)": "PolicyNo_1",
+        "Insured": "ClientName",
+        "Details": ["PolicyNo_2", "PlacingNo"],
     }
 
     dynamic_buckets = [

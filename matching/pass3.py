@@ -1634,7 +1634,7 @@ def pass3(cbl_df, insurer_df, tolerance=50, fuzzy_threshold=85, global_tracker=N
                         if is_exact_match:
                             can_use_all, available_indices, conflicts = global_tracker.can_use_for_exact(insurer_indices)
                         else:
-                            can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=True)
+                            can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(insurer_indices, allow_sharing=False)
 
                         if not available_indices:
                             logger.warning(f"  ⚠ No available insurer indices - skipping cluster")
@@ -1722,7 +1722,7 @@ def pass3(cbl_df, insurer_df, tolerance=50, fuzzy_threshold=85, global_tracker=N
 
                 # Validate insurer availability
                 can_use_all, available_indices, conflicts = global_tracker.can_use_for_partial(
-                    insurer_indices, allow_sharing=True
+                    insurer_indices, allow_sharing=False
                 )
 
                 if not available_indices:
