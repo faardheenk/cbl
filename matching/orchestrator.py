@@ -157,7 +157,7 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # all passes are done and won't touch these rows.
         if prev_output_file is not None:
             clean_cbl = finalize_history_no_match(clean_cbl)
-            clean_cbl = finalize_rematch_buckets(clean_cbl, rematch_stash)
+            clean_cbl = finalize_rematch_buckets(clean_cbl, rematch_stash, global_tracker)
             clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
 
         # ── Assign group_id to all matched rows ─────────────────────
