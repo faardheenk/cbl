@@ -33,8 +33,8 @@ def pass2(cbl_df, insurer_df, tolerance=50, global_tracker=None):
     potential_matches = []
 
     for i, row in cbl_df[cbl_df["match_status"].isin(["No Match", "Partial Match"])].iterrows():
-        # Skip rows already resolved by match history — user manual placements are authoritative
-        if row.get("match_resolved_in_pass") == "history":
+        # Skip rows already resolved by matrix — user manual placements are authoritative
+        if row.get("match_resolved_in_pass") in ("history", "matrix"):
             continue
 
         processed += 1

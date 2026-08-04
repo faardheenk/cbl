@@ -258,56 +258,82 @@ class SharePointService:
             logger.warning(f"[BUCKETS] Could not fetch dynamic buckets: {e}")
             return []
 
-    def get_history_file(self, insurer_name):
+    def get_matrix_output_file(self, insurer_name, library_name="Reconciliation Library"):
         """
-        Download history.xlsx for an insurer from the Matrix library.
-        Path: Matrix/{INSURER_NAME}/history.xlsx
+        Download the output.xlsx from the folder marked as Matrix for an insurer.
+
+        Queries the Reconciliation Library for subfolders of the insurer's
+        top-level folder. Returns the output.xlsx from the subfolder whose
+        'Matrix' column is True.
 
         Args:
-            insurer_name: Insurer folder name (e.g. "ALLIANZ")
+            insurer_name: Insurer folder name (e.g. "JUBILEE")
+            library_name: SharePoint library name
 
         Returns:
             bytes or None: File content as bytes, or None if not found.
         """
         try:
             ctx = self.get_client_context()
-            library = ctx.web.lists.get_by_title("Matrix")
+            library = ctx.web.lists.get_by_title(library_name)
             root_folder = library.root_folder
             ctx.load(root_folder)
             ctx.execute_query()
 
-            # First, list files in the insurer folder to debug
             insurer_folder_url = f"{root_folder.serverRelativeUrl}/{insurer_name}"
-            logger.info(f"[HISTORY] Looking in folder: {insurer_folder_url}")
+            logger.info(f"[MATRIX] Looking for matrix folder in: {insurer_folder_url}")
+
             try:
                 insurer_folder = ctx.web.get_folder_by_server_relative_url(insurer_folder_url)
-                files = insurer_folder.files
-                ctx.load(files)
+                subfolders = insurer_folder.folders
+                ctx.load(subfolders)
                 ctx.execute_query()
-                file_names = [f.name for f in files]
-                logger.info(f"[HISTORY] Files in Matrix/{insurer_name}/: {file_names}")
-            except Exception as list_err:
-                logger.error(f"[HISTORY] Could not list folder Matrix/{insurer_name}/: {type(list_err).__name__}: {list_err}")
+            except Exception as e:
+                logger.info(f"[MATRIX] Could not access {insurer_folder_url}: {e}")
+                return None
 
-            # Download history.xlsx from the folder files we already loaded
+            matrix_folder = None
+            for subfolder in subfolders:
+                try:
+                    list_item = subfolder.list_item_all_fields
+                    ctx.load(list_item)
+                    ctx.execute_query()
+
+                    is_matrix = list_item.properties.get("Matrix")
+                    if is_matrix and str(is_matrix).lower() in ("true", "1", "yes"):
+                        logger.info(f"[MATRIX] Found matrix folder: {subfolder.name}")
+                        matrix_folder = subfolder
+                        break
+                except Exception as e:
+                    logger.warning(f"[MATRIX] Could not read properties of {subfolder.name}: {e}")
+                    continue
+
+            if matrix_folder is None:
+                logger.info(f"[MATRIX] No folder marked as Matrix for '{insurer_name}'")
+                return None
+
+            files = matrix_folder.files
+            ctx.load(files)
+            ctx.execute_query()
+
             for f in files:
-                if f.name.lower() == "history.xlsx":
-                    logger.info(f"[HISTORY] Found history.xlsx — downloading...")
+                if f.name.lower() == "output.xlsx":
+                    logger.info(f"[MATRIX] Found output.xlsx in {matrix_folder.name} — downloading...")
                     file_content = f.read()
                     ctx.execute_query()
 
                     if hasattr(file_content, 'value'):
                         file_content = file_content.value
 
-                    logger.info(f"[HISTORY] history.xlsx downloaded — type={type(file_content).__name__}")
+                    logger.info(f"[MATRIX] output.xlsx downloaded — {len(file_content)} bytes")
                     return file_content
 
-            logger.info(f"[HISTORY] history.xlsx not found in file listing for {insurer_name}")
+            logger.info(f"[MATRIX] output.xlsx not found in matrix folder {matrix_folder.name}")
             return None
         except Exception as e:
             import traceback
-            logger.error(f"[HISTORY] Failed to download history.xlsx for {insurer_name}: {type(e).__name__}: {e}")
-            logger.error(f"[HISTORY] Traceback: {traceback.format_exc()}")
+            logger.error(f"[MATRIX] Failed to get matrix output for {insurer_name}: {type(e).__name__}: {e}")
+            logger.error(f"[MATRIX] Traceback: {traceback.format_exc()}")
             return None
 
     def get_matrix(self, insurer_name=None):
@@ -744,14 +770,13 @@ def main():
                     insurer_name = folder['parent_folder']
                     dynamic_buckets = sharepoint_service.get_dynamic_buckets()
 
-                    # Download match history for this insurer (if it exists)
-                    logger.info(f"[HISTORY] Attempting to download history.xlsx for insurer: '{insurer_name}'")
-                    logger.info(f"[HISTORY] Expected SharePoint path: Matrix/{insurer_name}/history.xlsx")
-                    history_content = sharepoint_service.get_history_file(insurer_name)
-                    if history_content is not None:
-                        logger.info(f"[HISTORY] SUCCESS — history.xlsx fetched, type={type(history_content).__name__}")
+                    # Download previous output (matrix) for this insurer (if one is marked)
+                    logger.info(f"[MATRIX] Attempting to download matrix output for insurer: '{insurer_name}'")
+                    prev_output_content = sharepoint_service.get_matrix_output_file(insurer_name)
+                    if prev_output_content is not None:
+                        logger.info(f"[MATRIX] SUCCESS — matrix output fetched, {len(prev_output_content)} bytes")
                     else:
-                        logger.info(f"[HISTORY] FAILED — history.xlsx not found for '{insurer_name}'")
+                        logger.info(f"[MATRIX] No matrix output found for '{insurer_name}' — running without")
 
                     # Run matching process
                     logger.info(f"Running matching process...")
@@ -761,7 +786,7 @@ def main():
                             cbl_file=cbl_file_content,
                             insurer_file=insurer_file_content,
                             output_file="output.xlsx",
-                            history_file=history_content,
+                            prev_output_file=prev_output_content,
                             dynamic_buckets=dynamic_buckets,
                         )
                         

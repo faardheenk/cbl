@@ -190,7 +190,7 @@ def _get_insurer_rows_for_group(group_cbl_rows, insurer_df):
         all_insurer_indices.update(_extract_insurer_indices(cbl_row))
     
     logger.debug(f"_get_insurer_rows_for_group: Collected {len(all_insurer_indices)} unique insurer indices: {all_insurer_indices}")
-    
+
     insurer_rows = []
     for insurer_idx in all_insurer_indices:
         # FIX: Use .loc (label-based) instead of .iloc (position-based)
@@ -200,7 +200,7 @@ def _get_insurer_rows_for_group(group_cbl_rows, insurer_df):
             continue
         insurer_row = insurer_df.loc[insurer_idx]
         insurer_rows.append(insurer_row)
-    
+
     logger.debug(f"_get_insurer_rows_for_group: Returning {len(insurer_rows)} insurer rows")
     return insurer_rows
 

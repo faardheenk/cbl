@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Match History Layer — Pre-places rows based on previous manual user moves.
+Match History Layer — Pre-places rows based on a previous output file.
 
-When a user manually moves rows between buckets in the reconciliation UI,
-fingerprints are recorded in history.xlsx. This module reads that history,
-regenerates fingerprints from new data, and automatically places matching
-rows into their previously assigned buckets before the comparison passes run.
+When a user saves their reconciliation output after moving rows between
+buckets, that output becomes the source of truth (the "matrix"). This
+module reads the previous output, extracts fingerprints from each sheet,
+and automatically places matching rows into their previously assigned
+buckets before the comparison passes run.
 """
 
 import pandas as pd
-import json
 import logging
 import io
 import datetime as dt
@@ -99,162 +99,161 @@ def generate_fingerprints_for_df(df: pd.DataFrame) -> pd.Series:
     return df.apply(generate_fingerprint, axis=1)
 
 
-def read_match_history(history_source) -> list:
-    """Read match history entries from history.xlsx.
+def read_previous_output(prev_output_source):
+    """Read a previous output file and extract placement records.
+
+    Each sheet maps to a target bucket. Rows are grouped by group_id
+    within each sheet. Fingerprints (_fingerprint, _fingerprint_INSURER)
+    identify which rows from the new data should be pre-placed.
 
     Args:
-        history_source: File path (str), file content (bytes), or None.
+        prev_output_source: File content (bytes), file path (str), or None.
 
     Returns:
-        list[dict]: Parsed history entries.
+        list[dict]: Placement records, each with target_bucket,
+            cbl_fingerprints, insurer_fingerprints, group_id,
+            cbl_remarks, insurer_remarks.
     """
-    if history_source is None:
-        logger.info("[HISTORY] history_source is None — no history file provided")
+    if prev_output_source is None:
         return []
-
-    logger.info(f"[HISTORY] Reading history file...")
 
     try:
-        if isinstance(history_source, bytes):
-            df = pd.read_excel(io.BytesIO(history_source), sheet_name="MatchHistory")
+        if isinstance(prev_output_source, bytes):
+            xls = pd.ExcelFile(io.BytesIO(prev_output_source))
         else:
-            df = pd.read_excel(history_source, sheet_name="MatchHistory")
-    except FileNotFoundError:
-        logger.info("[HISTORY] History file not found — no pre-placement will be applied")
-        return []
-    except ValueError as e:
-        logger.info(f"[HISTORY] History sheet not found: {e}")
-        return []
+            xls = pd.ExcelFile(prev_output_source)
     except Exception as e:
-        logger.warning(f"[HISTORY] Could not read match history: {e}")
+        logger.warning(f"[MATRIX] Could not read previous output: {e}")
         return []
 
-    if df.empty:
-        logger.info("[HISTORY] MatchHistory sheet is empty")
-        return []
+    SHEET_TO_BUCKET = {
+        "Exact Matches": "exact",
+        "Partial Matches": "partial",
+        "No Matches CBL": "no-match",
+    }
+    SKIP_SHEETS = {"No Matches Insurer", "_BucketConfig"}
 
-    logger.info(f"[HISTORY] MatchHistory sheet has {len(df)} rows, columns: {list(df.columns)}")
+    placements = []
 
-    # JSON array fields that can be split across continuation rows
-    _ARRAY_FIELDS = [
-        ("CblFingerprints", "cbl_fingerprints"),
-        ("InsurerFingerprints", "insurer_fingerprints"),
-        ("CblRemarks", "cbl_remarks"),
-        ("InsurerRemarks", "insurer_remarks"),
-        ("TargetCblFingerprints", "target_cbl_fingerprints"),
-        ("TargetInsurerFingerprints", "target_insurer_fingerprints"),
-        ("OrphanedCblFingerprints", "orphaned_cbl_fingerprints"),
-        ("OrphanedInsurerFingerprints", "orphaned_insurer_fingerprints"),
-    ]
-
-    def _parse_json_array(row, col_name):
-        try:
-            return json.loads(row[col_name]) if pd.notna(row.get(col_name)) else []
-        except (json.JSONDecodeError, TypeError):
-            return []
-
-    entries = []
-    current_entry = None
-    entry_idx = -1
-
-    for i, (_, row) in enumerate(df.iterrows()):
-        action_type = str(row.get("ActionType", "move")).strip().lower() if pd.notna(row.get("ActionType")) else "move"
-
-        if action_type == "continuation":
-            if current_entry is None:
-                logger.warning(f"[HISTORY] Row #{i} is a continuation with no preceding entry — skipping")
-                continue
-
-            for excel_col, key in _ARRAY_FIELDS:
-                current_entry[key] += _parse_json_array(row, excel_col)
-
-            logger.info(f"[HISTORY] Row #{i} continuation merged into entry #{entry_idx}")
+    for sheet_name in xls.sheet_names:
+        if sheet_name in SKIP_SHEETS:
             continue
 
-        # New entry — flush previous
-        if current_entry is not None:
-            entries.append(current_entry)
-
-        entry_idx += 1
+        target_bucket = SHEET_TO_BUCKET.get(sheet_name, sheet_name)
 
         try:
-            cbl_fps = json.loads(row["CblFingerprints"]) if pd.notna(row.get("CblFingerprints")) else []
-            ins_fps = json.loads(row["InsurerFingerprints"]) if pd.notna(row.get("InsurerFingerprints")) else []
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"[HISTORY] Skipping malformed history entry #{entry_idx}: {e}")
-            current_entry = None
+            df = pd.read_excel(xls, sheet_name=sheet_name)
+        except Exception as e:
+            logger.warning(f"[MATRIX] Could not read sheet '{sheet_name}': {e}")
             continue
 
-        cbl_remarks = _parse_json_array(row, "CblRemarks")
-        ins_remarks = _parse_json_array(row, "InsurerRemarks")
-        target_cbl_fps = _parse_json_array(row, "TargetCblFingerprints")
-        target_ins_fps = _parse_json_array(row, "TargetInsurerFingerprints")
-        orphaned_cbl_fps = _parse_json_array(row, "OrphanedCblFingerprints")
-        orphaned_ins_fps = _parse_json_array(row, "OrphanedInsurerFingerprints")
+        if df.empty:
+            continue
 
-        current_entry = {
-            "action_type": action_type,
-            "cbl_fingerprints": cbl_fps,
-            "insurer_fingerprints": ins_fps,
-            "cbl_remarks": cbl_remarks,
-            "insurer_remarks": ins_remarks,
-            "from_bucket": row.get("FromBucket", ""),
-            "target_bucket": row.get("TargetBucket", ""),
-            "timestamp": row.get("Timestamp", ""),
-            "target_cbl_fingerprints": target_cbl_fps,
-            "target_insurer_fingerprints": target_ins_fps,
-            "orphaned_cbl_fingerprints": orphaned_cbl_fps,
-            "orphaned_insurer_fingerprints": orphaned_ins_fps,
-        }
+        has_cbl_fp = "_fingerprint" in df.columns
+        has_ins_fp = "_fingerprint_INSURER" in df.columns
 
-        logger.info(f"[HISTORY] Entry #{entry_idx} ({action_type}): from='{current_entry['from_bucket']}' -> target='{current_entry['target_bucket']}' | "
-                     f"CBL fps={len(cbl_fps)}, Insurer fps={len(ins_fps)}")
-        if cbl_fps:
-            preview = cbl_fps[0][:80] + "..." if len(cbl_fps[0]) > 80 else cbl_fps[0]
-            logger.info(f"[HISTORY]   CBL fp[0]: {preview}")
-        if ins_fps:
-            preview = ins_fps[0][:80] + "..." if len(ins_fps[0]) > 80 else ins_fps[0]
-            logger.info(f"[HISTORY]   Insurer fp[0]: {preview}")
-        if action_type == "regroup":
-            logger.info(f"[HISTORY]   Regroup target CBL fps={len(target_cbl_fps)}, target Insurer fps={len(target_ins_fps)}, "
-                         f"orphaned CBL fps={len(orphaned_cbl_fps)}, orphaned Insurer fps={len(orphaned_ins_fps)}")
+        if not has_cbl_fp and not has_ins_fp:
+            logger.warning(f"[MATRIX] Sheet '{sheet_name}' has no fingerprint columns — skipping")
+            continue
 
-    # Flush the last entry
-    if current_entry is not None:
-        entries.append(current_entry)
+        has_group = "group_id" in df.columns
+        has_remarks = "Remarks" in df.columns
+        has_ins_remarks = "Remarks_INSURER" in df.columns
 
-    return entries
+        grouped_indices = {}
+        ungrouped_indices = []
+
+        for idx in df.index:
+            gk = None
+            if has_group:
+                val = df.at[idx, "group_id"]
+                if pd.notna(val) and str(val).strip():
+                    gk = str(val).strip()
+            if gk is not None:
+                grouped_indices.setdefault(gk, []).append(idx)
+            else:
+                ungrouped_indices.append(idx)
+
+        for group_id, indices in grouped_indices.items():
+            subset = df.loc[indices]
+            cbl_fps = []
+            ins_fps = []
+            cbl_remarks_list = []
+            ins_remarks_list = []
+
+            if has_cbl_fp:
+                cbl_fps = [fp for fp in subset["_fingerprint"] if pd.notna(fp) and str(fp).strip()]
+            if has_ins_fp:
+                ins_fps = [fp for fp in subset["_fingerprint_INSURER"] if pd.notna(fp) and str(fp).strip()]
+            if has_remarks:
+                cbl_remarks_list = [r if pd.notna(r) else "" for r in subset["Remarks"]]
+            if has_ins_remarks:
+                ins_remarks_list = [r if pd.notna(r) else "" for r in subset["Remarks_INSURER"]]
+
+            if cbl_fps or ins_fps:
+                placements.append({
+                    "target_bucket": target_bucket,
+                    "cbl_fingerprints": cbl_fps,
+                    "insurer_fingerprints": ins_fps,
+                    "group_id": group_id,
+                    "cbl_remarks": cbl_remarks_list,
+                    "insurer_remarks": ins_remarks_list,
+                })
+
+        for idx in ungrouped_indices:
+            row = df.loc[idx]
+            cbl_fps = []
+            ins_fps = []
+
+            if has_cbl_fp and pd.notna(row.get("_fingerprint")) and str(row["_fingerprint"]).strip():
+                cbl_fps = [str(row["_fingerprint"])]
+            if has_ins_fp and pd.notna(row.get("_fingerprint_INSURER")) and str(row["_fingerprint_INSURER"]).strip():
+                ins_fps = [str(row["_fingerprint_INSURER"])]
+
+            cbl_rem = [str(row.get("Remarks", ""))] if has_remarks else []
+            ins_rem = [str(row.get("Remarks_INSURER", ""))] if has_ins_remarks else []
+
+            if cbl_fps or ins_fps:
+                placements.append({
+                    "target_bucket": target_bucket,
+                    "cbl_fingerprints": cbl_fps,
+                    "insurer_fingerprints": ins_fps,
+                    "group_id": None,
+                    "cbl_remarks": cbl_rem,
+                    "insurer_remarks": ins_rem,
+                })
+
+    logger.info(f"[MATRIX] Read {len(placements)} placement records from previous output ({len(xls.sheet_names)} sheets)")
+    return placements
 
 
-def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None, dynamic_buckets=None):
+def apply_previous_output(cbl_df, insurer_df, prev_output_source, global_tracker=None, dynamic_buckets=None):
     """
-    Apply match history to pre-place rows in their correct buckets.
+    Pre-place rows based on a previous output file (the matrix).
 
     Called AFTER preprocessing + initialize_tracking, BEFORE any matching passes.
 
     Args:
         cbl_df: Preprocessed CBL DataFrame with tracking columns initialized.
         insurer_df: Preprocessed insurer DataFrame (columns have _INSURER suffix).
-        history_source: Path to history.xlsx (str), file content (bytes), or None.
+        prev_output_source: Previous output file content (bytes), path (str), or None.
         global_tracker: GlobalMatchTracker instance.
-        dynamic_buckets: list of {"BucketName": str, "BucketKey": str} or None.
+        dynamic_buckets: list of {"BucketName": str, "BucketKey": str, "Rematch": bool} or None.
 
     Returns:
         tuple: (cbl_df, insurer_df, summary_dict, rematch_stash, insurer_only_placements)
     """
-    history = read_match_history(history_source)
+    placements = read_previous_output(prev_output_source)
 
-    if not history:
-        logger.info("[HISTORY] No match history found — skipping pre-placement")
+    if not placements:
+        logger.info("[MATRIX] No placement records found — skipping pre-placement")
         return cbl_df, insurer_df, {"exact": 0, "partial": 0, "no-match": 0}, [], {}
 
-    logger.info(f"[HISTORY] Found {len(history)} history entries — using canonical fingerprints...")
+    logger.info(f"[MATRIX] Found {len(placements)} placement records — matching against new data...")
 
-    # --- Use pre-generated canonical fingerprints ---
-    # Fingerprints are generated by the orchestrator before this function is called.
-    # CBL fingerprints are in "_fingerprint", insurer fingerprints in "_fingerprint_INSURER".
     if "_fingerprint" not in cbl_df.columns or "_fingerprint_INSURER" not in insurer_df.columns:
-        logger.warning("[HISTORY] Canonical fingerprints not found — generating on the fly")
+        logger.warning("[MATRIX] Canonical fingerprints not found — generating on the fly")
         cbl_df["_fingerprint"] = generate_fingerprints_for_df(cbl_df)
         insurer_cols_stripped = {
             col: col[:-len("_INSURER")] if col.endswith("_INSURER") else col
@@ -263,18 +262,6 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
         fp_insurer_source = insurer_df.rename(columns=insurer_cols_stripped)
         insurer_df["_fingerprint_INSURER"] = generate_fingerprints_for_df(fp_insurer_source)
 
-    # --- Log sample fingerprints ---
-    logger.info(f"[HISTORY] Using {len(cbl_df)} CBL fingerprints, {len(insurer_df)} insurer fingerprints")
-    for i in range(min(3, len(cbl_df))):
-        fp = cbl_df["_fingerprint"].iloc[i]
-        preview = fp[:120] + "..." if len(fp) > 120 else fp
-        logger.info(f"[HISTORY] CBL row {cbl_df.index[i]} fp: {preview}")
-    for i in range(min(3, len(insurer_df))):
-        fp = insurer_df["_fingerprint_INSURER"].iloc[i]
-        preview = fp[:120] + "..." if len(fp) > 120 else fp
-        logger.info(f"[HISTORY] Insurer row {insurer_df.index[i]} fp: {preview}")
-
-    # --- Build lookup maps: fingerprint -> [indices] ---
     cbl_fp_map = {}
     for idx, fp in cbl_df["_fingerprint"].items():
         cbl_fp_map.setdefault(fp, []).append(idx)
@@ -283,294 +270,130 @@ def apply_match_history(cbl_df, insurer_df, history_source, global_tracker=None,
     for idx, fp in insurer_df["_fingerprint_INSURER"].items():
         insurer_fp_map.setdefault(fp, []).append(idx)
 
-    logger.info(f"[HISTORY] Unique CBL fingerprints: {len(cbl_fp_map)}, Unique insurer fingerprints: {len(insurer_fp_map)}")
+    logger.info(f"[MATRIX] Unique CBL fingerprints: {len(cbl_fp_map)}, Unique insurer fingerprints: {len(insurer_fp_map)}")
 
-    # --- Match history entries against new data ---
     claimed_cbl = set()
     claimed_insurer = set()
     summary = {"exact": 0, "partial": 0, "no-match": 0}
-    history_group_counter = 0
+    group_counter = 0
 
-    # Build set of valid target bucket keys (fixed + dynamic)
     dynamic_bucket_keys = set()
     rematch_bucket_keys = set()
+    bucket_name_to_key = {}
     if dynamic_buckets:
         dynamic_bucket_keys = {b["BucketKey"] for b in dynamic_buckets}
         rematch_bucket_keys = {b["BucketKey"] for b in dynamic_buckets if b.get("Rematch", False)}
+        bucket_name_to_key = {b["BucketName"]: b["BucketKey"] for b in dynamic_buckets}
         for key in dynamic_bucket_keys:
             summary[key] = 0
     valid_targets = {"exact", "partial", "no-match"} | dynamic_bucket_keys
 
     rematch_stash = []
-    insurer_only_placements = {}  # bucket_key -> set of insurer indices (insurer-only moves)
+    insurer_only_placements = {}
 
-    for entry_idx, entry in enumerate(history):
-        target = entry["target_bucket"]
+    for record in placements:
+        target = record["target_bucket"]
+        target = bucket_name_to_key.get(target, target)
         if target not in valid_targets:
-            logger.warning(f"[HISTORY] Unknown target bucket '{target}' — skipping entry #{entry_idx}")
+            logger.warning(f"[MATRIX] Unknown target bucket '{target}' — skipping")
             continue
-
-        action_type = entry.get("action_type", "move")
 
         entry_cbl_indices = []
         entry_insurer_indices = []
-        cbl_remarks_list = entry.get("cbl_remarks", [])
-        ins_remarks_list = entry.get("insurer_remarks", [])
+        cbl_remarks_list = record.get("cbl_remarks", [])
+        ins_remarks_list = record.get("insurer_remarks", [])
 
-        # Match CBL fingerprints (one match per fingerprint)
-        cbl_matched = 0
-        cbl_missed = 0
-        cbl_reclaimed = 0
-        for fp_idx, fp in enumerate(entry["cbl_fingerprints"]):
+        for fp_idx, fp in enumerate(record["cbl_fingerprints"]):
             if fp in cbl_fp_map:
-                found_unclaimed = False
                 for idx in cbl_fp_map[fp]:
                     if idx not in claimed_cbl:
                         entry_cbl_indices.append(idx)
                         claimed_cbl.add(idx)
-                        cbl_matched += 1
-                        found_unclaimed = True
                         if fp_idx < len(cbl_remarks_list) and cbl_remarks_list[fp_idx]:
                             cbl_df.at[idx, "Remarks"] = cbl_remarks_list[fp_idx]
                         break
-                if not found_unclaimed:
-                    idx = cbl_fp_map[fp][0]
-                    entry_cbl_indices.append(idx)
-                    cbl_reclaimed += 1
-                    if fp_idx < len(cbl_remarks_list) and cbl_remarks_list[fp_idx]:
-                        cbl_df.at[idx, "Remarks"] = cbl_remarks_list[fp_idx]
-            else:
-                cbl_missed += 1
-                preview = fp[:80] + "..." if len(fp) > 80 else fp
-                logger.info(f"[HISTORY] Entry #{entry_idx} CBL fp NOT FOUND: {preview}")
 
-        # Match insurer fingerprints (one match per fingerprint)
-        ins_matched = 0
-        ins_missed = 0
-        ins_reclaimed = 0
-        for fp_idx, fp in enumerate(entry["insurer_fingerprints"]):
+        for fp_idx, fp in enumerate(record["insurer_fingerprints"]):
             if fp in insurer_fp_map:
-                found_unclaimed = False
                 for idx in insurer_fp_map[fp]:
                     if idx not in claimed_insurer:
                         entry_insurer_indices.append(idx)
                         claimed_insurer.add(idx)
-                        ins_matched += 1
-                        found_unclaimed = True
                         if fp_idx < len(ins_remarks_list) and ins_remarks_list[fp_idx]:
                             insurer_df.at[idx, "Remarks_INSURER"] = ins_remarks_list[fp_idx]
                         break
-                if not found_unclaimed:
-                    idx = insurer_fp_map[fp][0]
-                    entry_insurer_indices.append(idx)
-                    ins_reclaimed += 1
-                    if fp_idx < len(ins_remarks_list) and ins_remarks_list[fp_idx]:
-                        insurer_df.at[idx, "Remarks_INSURER"] = ins_remarks_list[fp_idx]
-            else:
-                ins_missed += 1
-                preview = fp[:80] + "..." if len(fp) > 80 else fp
-                logger.info(f"[HISTORY] Entry #{entry_idx} Insurer fp NOT FOUND: {preview}")
-
-        if cbl_reclaimed or ins_reclaimed:
-            logger.info(f"[HISTORY] Entry #{entry_idx} sequential op: re-claimed {cbl_reclaimed} CBL, {ins_reclaimed} insurer rows from earlier entries")
-
-        logger.info(f"[HISTORY] Entry #{entry_idx} ({action_type} -> {target}): CBL {cbl_matched + cbl_reclaimed}/{len(entry['cbl_fingerprints'])} matched, "
-                     f"Insurer {ins_matched + ins_reclaimed}/{len(entry['insurer_fingerprints'])} matched")
 
         if not entry_cbl_indices and not entry_insurer_indices:
-            logger.info(f"[HISTORY] Entry #{entry_idx}: NO matches at all — skipping")
             continue
 
-        # ─── REGROUP: merge moved rows into the target group ────────────
-        if action_type == "regroup":
-            target_cbl_indices = []
-            target_insurer_indices = []
-
-            for fp in entry.get("target_cbl_fingerprints", []):
-                if fp in cbl_fp_map:
-                    found = False
-                    for idx in cbl_fp_map[fp]:
-                        if idx not in claimed_cbl:
-                            target_cbl_indices.append(idx)
-                            claimed_cbl.add(idx)
-                            found = True
-                            break
-                    if not found:
-                        target_cbl_indices.append(cbl_fp_map[fp][0])
-
-            for fp in entry.get("target_insurer_fingerprints", []):
-                if fp in insurer_fp_map:
-                    found = False
-                    for idx in insurer_fp_map[fp]:
-                        if idx not in claimed_insurer:
-                            target_insurer_indices.append(idx)
-                            claimed_insurer.add(idx)
-                            found = True
-                            break
-                    if not found:
-                        target_insurer_indices.append(insurer_fp_map[fp][0])
-
-            # Orphaned rows go to no-match
-            orphaned_cbl_indices = []
-            orphaned_insurer_indices = []
-
-            for fp in entry.get("orphaned_cbl_fingerprints", []):
-                if fp in cbl_fp_map:
-                    found = False
-                    for idx in cbl_fp_map[fp]:
-                        if idx not in claimed_cbl:
-                            orphaned_cbl_indices.append(idx)
-                            claimed_cbl.add(idx)
-                            found = True
-                            break
-                    if not found:
-                        orphaned_cbl_indices.append(cbl_fp_map[fp][0])
-
-            for fp in entry.get("orphaned_insurer_fingerprints", []):
-                if fp in insurer_fp_map:
-                    found = False
-                    for idx in insurer_fp_map[fp]:
-                        if idx not in claimed_insurer:
-                            orphaned_insurer_indices.append(idx)
-                            claimed_insurer.add(idx)
-                            found = True
-                            break
-                    if not found:
-                        orphaned_insurer_indices.append(insurer_fp_map[fp][0])
-
-            logger.info(f"[HISTORY] Entry #{entry_idx} regroup: target CBL={len(target_cbl_indices)}, "
-                         f"target Insurer={len(target_insurer_indices)}, "
-                         f"orphaned CBL={len(orphaned_cbl_indices)}, orphaned Insurer={len(orphaned_insurer_indices)}")
-
-            # Merged group = moved rows + target group rows
-            merged_cbl_indices = entry_cbl_indices + target_cbl_indices
-            merged_insurer_indices = entry_insurer_indices + target_insurer_indices
-
-            if target == "no-match":
-                match_status = HISTORY_NO_MATCH_SENTINEL
-            elif target == "exact":
-                match_status = "Exact Match"
-            elif target == "partial":
-                match_status = "Partial Match"
-            else:
-                match_status = f"{DYNAMIC_BUCKET_SENTINEL_PREFIX}{target}"
-
-            group_id = f"HISTORY_REGROUP_{history_group_counter}"
-            history_group_counter += 1
-
-            for cbl_idx in merged_cbl_indices:
-                cbl_df.at[cbl_idx, "match_status"] = match_status
-                cbl_df.at[cbl_idx, "matched_insurer_indices"] = list(merged_insurer_indices)
-                cbl_df.at[cbl_idx, "match_reason"] = f"History regroup ({target})"
-                cbl_df.at[cbl_idx, "match_pass"] = ["history"]
-                cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "history"
-                cbl_df.at[cbl_idx, "group_id"] = group_id
-                logger.info(f"[HISTORY] Regroup-placed CBL idx={cbl_idx} -> {match_status} | group={group_id}")
-
-            if global_tracker and merged_insurer_indices:
-                global_tracker.mark_matrix_used(merged_insurer_indices)
-
-            # Place orphaned rows into no-match
-            for cbl_idx in orphaned_cbl_indices:
-                cbl_df.at[cbl_idx, "match_status"] = HISTORY_NO_MATCH_SENTINEL
-                cbl_df.at[cbl_idx, "match_reason"] = "History regroup orphan (no-match)"
-                cbl_df.at[cbl_idx, "match_pass"] = ["history"]
-                logger.info(f"[HISTORY] Orphaned CBL idx={cbl_idx} -> No Match")
-
-            if global_tracker and orphaned_insurer_indices:
-                global_tracker.mark_matrix_used(orphaned_insurer_indices)
-
-            summary[target] += len(merged_cbl_indices)
-            summary["no-match"] += len(orphaned_cbl_indices)
-            continue
-
-        # ─── MOVE: standard bucket pre-placement ────────────────────────
-        if target in ("exact", "partial") or target in dynamic_bucket_keys:
-            # Insurer-only move (no CBL rows) to a dynamic bucket — always place
-            # directly, even for rematchable buckets (re-matching is CBL-centric)
-            if not entry_cbl_indices and entry_insurer_indices and target in dynamic_bucket_keys:
-                insurer_only_placements.setdefault(target, set()).update(entry_insurer_indices)
-                if global_tracker:
-                    global_tracker.mark_matrix_used(entry_insurer_indices)
-                logger.info(f"[HISTORY] Insurer-only placement: {len(entry_insurer_indices)} insurer rows -> {target}")
-                continue
-
-            # Rematchable buckets: stash rows for re-matching instead of pre-placing
-            if target in rematch_bucket_keys:
-                rematch_stash.append({
-                    "target_bucket": target,
-                    "cbl_indices": list(entry_cbl_indices),
-                    "insurer_indices": list(entry_insurer_indices),
-                })
-                for cbl_idx in entry_cbl_indices:
-                    claimed_cbl.discard(cbl_idx)
-                for ins_idx in entry_insurer_indices:
-                    claimed_insurer.discard(ins_idx)
-                logger.info(f"[HISTORY] Stashed {len(entry_cbl_indices)} CBL + {len(entry_insurer_indices)} insurer rows for re-matching (bucket={target})")
-                summary[target] += len(entry_cbl_indices)
-                continue
-
-            if target == "exact":
-                match_status = "Exact Match"
-            elif target == "partial":
-                match_status = "Partial Match"
-            else:
-                match_status = f"{DYNAMIC_BUCKET_SENTINEL_PREFIX}{target}"
-
-            group_id = None
-            if len(entry_cbl_indices) > 1:
-                group_id = f"HISTORY_{history_group_counter}"
-                history_group_counter += 1
-
-            for cbl_idx in entry_cbl_indices:
-                cbl_df.at[cbl_idx, "match_status"] = match_status
-                cbl_df.at[cbl_idx, "matched_insurer_indices"] = list(entry_insurer_indices)
-                cbl_df.at[cbl_idx, "match_reason"] = f"History pre-placed ({target})"
-                cbl_df.at[cbl_idx, "match_pass"] = ["history"]
-                cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "history"
-                if group_id is not None:
-                    cbl_df.at[cbl_idx, "group_id"] = group_id
-                logger.info(f"[HISTORY] Pre-placed CBL idx={cbl_idx} -> {match_status} | insurer_indices={entry_insurer_indices}")
-
-            if global_tracker and entry_insurer_indices:
+        # Insurer-only placement to a dynamic bucket
+        if not entry_cbl_indices and entry_insurer_indices and target in dynamic_bucket_keys:
+            insurer_only_placements.setdefault(target, set()).update(entry_insurer_indices)
+            if global_tracker:
                 global_tracker.mark_matrix_used(entry_insurer_indices)
-                logger.info(f"[HISTORY] Registered {len(entry_insurer_indices)} insurer indices in GlobalTracker")
+            logger.info(f"[MATRIX] Insurer-only: {len(entry_insurer_indices)} insurer rows -> {target}")
+            continue
 
+        # Rematchable bucket — stash for re-matching
+        if target in rematch_bucket_keys:
+            rematch_stash.append({
+                "target_bucket": target,
+                "cbl_indices": list(entry_cbl_indices),
+                "insurer_indices": list(entry_insurer_indices),
+            })
+            for cbl_idx in entry_cbl_indices:
+                claimed_cbl.discard(cbl_idx)
+            for ins_idx in entry_insurer_indices:
+                claimed_insurer.discard(ins_idx)
+            summary[target] += len(entry_cbl_indices)
+            continue
+
+        # Standard placement
+        if target == "exact":
+            match_status = "Exact Match"
+        elif target == "partial":
+            match_status = "Partial Match"
         elif target == "no-match":
-            for cbl_idx in entry_cbl_indices:
-                cbl_df.at[cbl_idx, "match_status"] = HISTORY_NO_MATCH_SENTINEL
-                cbl_df.at[cbl_idx, "match_reason"] = "History pre-placed (no-match)"
-                cbl_df.at[cbl_idx, "match_pass"] = ["history"]
-                logger.info(f"[HISTORY] Pre-placed CBL idx={cbl_idx} -> No Match (sentinel)")
+            match_status = HISTORY_NO_MATCH_SENTINEL
+        else:
+            match_status = f"{DYNAMIC_BUCKET_SENTINEL_PREFIX}{target}"
 
-            if global_tracker and entry_insurer_indices:
-                global_tracker.mark_matrix_used(entry_insurer_indices)
-                logger.info(f"[HISTORY] Registered {len(entry_insurer_indices)} insurer indices in GlobalTracker")
+        group_id = record.get("group_id")
+        if group_id is None and len(entry_cbl_indices) > 1:
+            group_id = f"MATRIX_{group_counter}"
+            group_counter += 1
+
+        for cbl_idx in entry_cbl_indices:
+            cbl_df.at[cbl_idx, "match_status"] = match_status
+            cbl_df.at[cbl_idx, "matched_insurer_indices"] = list(entry_insurer_indices)
+            cbl_df.at[cbl_idx, "match_reason"] = f"Matrix pre-placed ({target})"
+            cbl_df.at[cbl_idx, "match_pass"] = ["matrix"]
+            cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "matrix"
+            if group_id is not None:
+                cbl_df.at[cbl_idx, "group_id"] = group_id
+
+        if global_tracker and entry_insurer_indices:
+            global_tracker.mark_matrix_used(entry_insurer_indices)
 
         summary[target] += len(entry_cbl_indices)
 
-    # --- Summary ---
     total = sum(summary.values())
     rematch_cbl_count = sum(len(s["cbl_indices"]) for s in rematch_stash)
     insurer_only_count = sum(len(v) for v in insurer_only_placements.values())
-    logger.info(f"[HISTORY] ========== MATCH HISTORY SUMMARY ==========")
-    logger.info(f"[HISTORY] Exact:    {summary['exact']} CBL rows pre-placed")
-    logger.info(f"[HISTORY] Partial:  {summary['partial']} CBL rows pre-placed")
-    logger.info(f"[HISTORY] No Match: {summary['no-match']} CBL rows pre-placed")
+    logger.info(f"[MATRIX] ========== MATRIX PRE-PLACEMENT SUMMARY ==========")
+    logger.info(f"[MATRIX] Exact:    {summary['exact']} CBL rows pre-placed")
+    logger.info(f"[MATRIX] Partial:  {summary['partial']} CBL rows pre-placed")
+    logger.info(f"[MATRIX] No Match: {summary['no-match']} CBL rows pre-placed")
     for key in dynamic_bucket_keys:
         if summary.get(key, 0) > 0:
             label = f"{key} (rematch)" if key in rematch_bucket_keys else key
-            logger.info(f"[HISTORY] {label}: {summary[key]} CBL rows — {'stashed for re-matching' if key in rematch_bucket_keys else 'pre-placed'}")
+            logger.info(f"[MATRIX] {label}: {summary[key]} CBL rows — {'stashed for re-matching' if key in rematch_bucket_keys else 'pre-placed'}")
         if key in insurer_only_placements:
-            logger.info(f"[HISTORY] {key}: {len(insurer_only_placements[key])} insurer-only rows placed")
-    logger.info(f"[HISTORY] Total:    {total} CBL rows processed ({rematch_cbl_count} stashed for re-matching)")
+            logger.info(f"[MATRIX] {key}: {len(insurer_only_placements[key])} insurer-only rows placed")
+    logger.info(f"[MATRIX] Total:    {total} CBL rows processed ({rematch_cbl_count} stashed for re-matching)")
     if insurer_only_count:
-        logger.info(f"[HISTORY] Insurer-only placements: {insurer_only_count} insurer rows across {len(insurer_only_placements)} bucket(s)")
-    if total == 0 and insurer_only_count == 0:
-        logger.info("[HISTORY] No fingerprint matches found — all rows will go through normal comparison")
-        logger.info("[HISTORY] This means the fingerprints from history.xlsx do NOT match any regenerated fingerprints.")
-        logger.info("[HISTORY] Check that the frontend and backend use the same exclude list and value formatting.")
-    logger.info(f"[HISTORY] =============================================")
+        logger.info(f"[MATRIX] Insurer-only placements: {insurer_only_count} insurer rows across {len(insurer_only_placements)} bucket(s)")
+    logger.info(f"[MATRIX] =====================================================")
 
     return cbl_df, insurer_df, summary, rematch_stash, insurer_only_placements
 

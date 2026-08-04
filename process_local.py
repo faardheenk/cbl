@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def main():
     cbl_path = os.path.join("data", "cbl.xlsx")
     insurer_path = os.path.join("data", "insurer.xlsx")
-    history_path = os.path.join("data", "history.xlsx")
+    prev_output_path = os.path.join("data", "prev_output.xlsx")
     insurer_name = "MUA"
 
     cbl_custom_mappings = {
@@ -44,13 +44,13 @@ def main():
     with open(insurer_path, "rb") as f:
         insurer_content = f.read()
 
-    history_content = None
-    if os.path.exists(history_path):
-        with open(history_path, "rb") as f:
-            history_content = f.read()
-        logger.info(f"History file loaded: {history_path}")
+    prev_output_content = None
+    if os.path.exists(prev_output_path):
+        with open(prev_output_path, "rb") as f:
+            prev_output_content = f.read()
+        logger.info(f"Previous output (matrix) loaded: {prev_output_path}")
     else:
-        logger.info(f"No history file found at {history_path} — skipping")
+        logger.info(f"No previous output file found at {prev_output_path} — skipping")
 
     cbl_df = read_excel_with_smart_headers(cbl_content)
     insurer_df = read_excel_with_smart_headers(insurer_content)
@@ -75,7 +75,7 @@ def main():
         cbl_file=cbl_content,
         insurer_file=insurer_content,
         output_file=f"{insurer_name}_output.xlsx",
-        history_file=history_content,
+        prev_output_file=prev_output_content,
         dynamic_buckets=dynamic_buckets,
     )
 

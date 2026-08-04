@@ -5,7 +5,7 @@ import logging
 import os
 from .data_processing import preprocess, initialize_tracking, read_excel_with_smart_headers
 from .matching_engine import GlobalMatchTracker
-from .match_history import apply_match_history, finalize_history_no_match, finalize_history_dynamic_buckets, finalize_rematch_buckets, generate_fingerprints_for_df
+from .match_history import apply_previous_output, finalize_history_no_match, finalize_history_dynamic_buckets, finalize_rematch_buckets, generate_fingerprints_for_df
 from .pass1 import pass1
 from .pass2 import pass2
 from .pass3 import pass3
@@ -15,7 +15,7 @@ import io
 logger = logging.getLogger(__name__)
 
 
-def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50, history_file=None, dynamic_buckets=None):
+def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, output_file='output.xlsx', tolerance=50, prev_output_file=None, dynamic_buckets=None):
     """
     Run the matching process between CBL and insurer files.
 
@@ -25,8 +25,8 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         insurer_file (bytes, optional): Insurer Excel file content as bytes. If None, will be prompted.
         output_file (str, optional): Output Excel file name. Defaults to 'output.xlsx'.
         tolerance (int, optional): Tolerance for amount matching. Defaults to 100.
-        history_file (str or bytes, optional): Path to history.xlsx or its content as bytes.
-            If provided, rows matching previous manual moves are pre-placed before passes.
+        prev_output_file (bytes or str, optional): Previous output file (the matrix) as bytes or path.
+            If provided, rows are pre-placed based on their sheet placement in this file.
 
     Returns:
         dict: Results dictionary containing match statistics and output file content as bytes
@@ -81,26 +81,25 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # Initialize comprehensive global match tracker for consistent behavior across all passes
         global_tracker = GlobalMatchTracker()
 
-        # ── Match History Layer ──────────────────────────────────────────
-        # Pre-place rows based on previous manual user moves (before any passes).
-        # Rows that match history fingerprints are placed directly into their
-        # target buckets; the remaining rows proceed through normal comparison.
-        # Rows in rematchable buckets are stashed and left unmatched so passes
-        # can try to match them against new data first.
+        # ── Matrix Layer ─────────────────────────────────────────────────
+        # Pre-place rows based on a previous output file (the matrix).
+        # Rows whose fingerprints match the previous output are placed into
+        # the same sheet/bucket; remaining rows proceed through normal passes.
+        # Rows in rematchable buckets are stashed so passes can try first.
         rematch_stash = []
         insurer_only_placements = {}
-        if history_file is not None:
-            logger.info(f"[HISTORY] History file provided — running match history layer")
-            clean_cbl, clean_insurer, history_summary, rematch_stash, insurer_only_placements = apply_match_history(
-                clean_cbl, clean_insurer, history_file, global_tracker, dynamic_buckets
+        if prev_output_file is not None:
+            logger.info(f"[MATRIX] Previous output file provided — running matrix layer")
+            clean_cbl, clean_insurer, matrix_summary, rematch_stash, insurer_only_placements = apply_previous_output(
+                clean_cbl, clean_insurer, prev_output_file, global_tracker, dynamic_buckets
             )
-            logger.info(f"[HISTORY] After History Layer: {global_tracker.get_usage_summary()}")
+            logger.info(f"[MATRIX] After Matrix Layer: {global_tracker.get_usage_summary()}")
             if rematch_stash:
-                logger.info(f"[HISTORY] {sum(len(s['cbl_indices']) for s in rematch_stash)} CBL rows stashed for re-matching")
+                logger.info(f"[MATRIX] {sum(len(s['cbl_indices']) for s in rematch_stash)} CBL rows stashed for re-matching")
             if insurer_only_placements:
-                logger.info(f"[HISTORY] {sum(len(v) for v in insurer_only_placements.values())} insurer-only rows placed into dynamic buckets")
+                logger.info(f"[MATRIX] {sum(len(v) for v in insurer_only_placements.values())} insurer-only rows placed into dynamic buckets")
         else:
-            logger.info("[HISTORY] No history file provided — skipping match history layer")
+            logger.info("[MATRIX] No previous output file provided — skipping matrix layer")
 
         # ── Matching Passes ──────────────────────────────────────────────
         # Helper function to check if required keys exist in column mappings
@@ -153,10 +152,10 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         logger.info(f"Final Global Tracker: {final_summary}")
         logger.info(f"Total unique insurer rows used: {final_summary['total_unique_insurer_used']}/{len(clean_insurer)} ({final_summary['total_unique_insurer_used']/len(clean_insurer)*100:.1f}%)")
 
-        # ── Finalize History No-Match ─────────────────────────────────
-        # Convert sentinel _History_No_Match status back to "No Match"
-        # now that all passes are done and won't touch these rows.
-        if history_file is not None:
+        # ── Finalize Matrix Sentinels ─────────────────────────────────
+        # Convert sentinel values back to their real status now that
+        # all passes are done and won't touch these rows.
+        if prev_output_file is not None:
             clean_cbl = finalize_history_no_match(clean_cbl)
             clean_cbl = finalize_rematch_buckets(clean_cbl, rematch_stash)
             clean_cbl = finalize_history_dynamic_buckets(clean_cbl)
