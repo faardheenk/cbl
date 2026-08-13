@@ -57,6 +57,12 @@ class SharePointService:
         # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
         # self.tenant= "citybrokersltdmu.onmicrosoft.com"
         # self.cert_path= "E:\\FRCI\\certificate\\cert.pem"
+        
+        # self.site_url = "https://citybrokersltdmu.sharepoint.com/sites/statementrecon"
+        # self.cert_thumbprint = "B3F2EB224794D54AF99FD443D1E4ABFEF8E10C7B"
+        # self.client_id = "74de1033-3314-49cc-8f5a-829e0ec76b27"
+        # self.tenant= "citybrokersltdmu.onmicrosoft.com"
+        # self.cert_path= "C:\\Users\\boshavg.SERVICES\Desktop\\Projects\\CityBrokers\\certificate\\cert.pem"
 
         self.cert_credentials = {
             "tenant": self.tenant,

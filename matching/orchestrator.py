@@ -166,17 +166,37 @@ def run_matching_process(column_mappings, cbl_file=None, insurer_file=None, outp
         # frontend selection/highlighting.
         if 'group_id' in clean_cbl.columns:
             matched_mask = clean_cbl['match_status'].isin(['Exact Match', 'Partial Match'])
-            no_group_mask = matched_mask & (clean_cbl['group_id'].isna() | (clean_cbl['group_id'] == ''))
             if dynamic_buckets:
                 dynamic_keys = {b['BucketKey'] for b in dynamic_buckets}
-                dynamic_mask = clean_cbl['match_status'].isin(dynamic_keys)
-                no_group_mask = no_group_mask | (dynamic_mask & (clean_cbl['group_id'].isna() | (clean_cbl['group_id'] == '')))
+                matched_mask = matched_mask | clean_cbl['match_status'].isin(dynamic_keys)
+            # Any row holding insurer rows needs an id whatever its status.
+            # A multi-insurer match is written as one anchor row plus
+            # insurer-only continuation rows, and those inherit the anchor's
+            # group_id (output_handler) — without one they are unattributable
+            # when this output is later read back as a matrix. Rows left as
+            # "No Match" by finalize_rematch_buckets still carry insurer rows,
+            # so status alone is not a safe test.
+            holds_insurer = clean_cbl['matched_insurer_indices'].apply(
+                lambda v: isinstance(v, (list, tuple, set)) and len(v) > 0
+            )
+            needs_id = matched_mask | holds_insurer
+            no_group_mask = needs_id & (clean_cbl['group_id'].isna() | (clean_cbl['group_id'] == ''))
+            # Skip names already in use. Matrix-restored rows arrive carrying
+            # group ids minted by an earlier run, so a counter that restarts
+            # at 1 would otherwise merge an unrelated match into a restored
+            # group.
+            taken = set(clean_cbl['group_id'].dropna().astype(str))
             individual_counter = 0
+            assigned = 0
             for idx in clean_cbl[no_group_mask].index:
                 individual_counter += 1
+                while f"MATCH_{individual_counter}" in taken:
+                    individual_counter += 1
                 clean_cbl.at[idx, 'group_id'] = f"MATCH_{individual_counter}"
-            if individual_counter > 0:
-                logger.info(f"Assigned group_id to {individual_counter} individual matched rows without one")
+                taken.add(f"MATCH_{individual_counter}")
+                assigned += 1
+            if assigned > 0:
+                logger.info(f"Assigned group_id to {assigned} individual matched rows without one")
 
         # Sort by group_id to keep grouped rows together in output
         if 'group_id' in clean_cbl.columns:

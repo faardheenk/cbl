@@ -1,94 +1,84 @@
 #!/usr/bin/env python3
-"""Process local CBL and insurer Excel files through the matching engine."""
+"""Run the matching engine against local Excel files.
 
-import os
+Usage:
+    python process_local.py                  # swan
+    python process_local.py mua
+    python process_local.py swan --no-matrix # ignore the previous output
+
+Inputs and column mappings come from local_profiles.py. Results are written
+to data/output_<profile>.xlsx.
+"""
+
+import argparse
 import logging
-from matching.orchestrator import run_matching_process
-from matching.data_processing import create_dynamic_column_mappings, read_excel_with_smart_headers
+import os
+import sys
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+import local_profiles as profiles
+from matching.orchestrator import run_matching_process
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main():
-    cbl_path = os.path.join("data", "cbl.xlsx")
-    insurer_path = os.path.join("data", "insurer.xlsx")
-    prev_output_path = os.path.join("data", "prev_output.xlsx")
-    insurer_name = "MUA"
-
-    cbl_custom_mappings = {
-        "Placing/Endorsement No.": "PlacingNo",
-        "Policy No.": "PolicyNo",
-        "Client Name": "ClientName",
-        "Balance Net of Brokerage": "ProcessedAmount",
-    }
-
-    insurer_custom_mappings = {
-        "Amount (Balance)": "ProcessedAmount",
-        "Underwriting  (Reference)": "PolicyNo_1",
-        "Insured": "ClientName",
-        "Details": ["PolicyNo_2", "PlacingNo"],
-    }
-
-    dynamic_buckets = [
-        {"BucketName": "Timing Differences", "BucketKey": "timing_differences", "Rematch": True},
-        {"BucketName": "Allocation Issues", "BucketKey": "allocation_issues", "Rematch": False},
-        {"BucketName": "Correction to be done by CBL", "BucketKey": "correction_to_be_done_by_cbl", "Rematch": False},
-        {"BucketName": "Correction to be done by insurer", "BucketKey": "correction_to_be_done_by_insurer", "Rematch": False},
-        {"BucketName": "Mise en demeure", "BucketKey": "mise_en_demeure", "Rematch": False},
-        {"BucketName": "Miscellaneous", "BucketKey": "miscellaneous", "Rematch": False},
-    ]
-
-    with open(cbl_path, "rb") as f:
-        cbl_content = f.read()
-    with open(insurer_path, "rb") as f:
-        insurer_content = f.read()
-
-    prev_output_content = None
-    if os.path.exists(prev_output_path):
-        with open(prev_output_path, "rb") as f:
-            prev_output_content = f.read()
-        logger.info(f"Previous output (matrix) loaded: {prev_output_path}")
-    else:
-        logger.info(f"No previous output file found at {prev_output_path} — skipping")
-
-    cbl_df = read_excel_with_smart_headers(cbl_content)
-    insurer_df = read_excel_with_smart_headers(insurer_content)
-
-    logger.info(f"CBL columns: {list(cbl_df.columns)}")
-    logger.info(f"Insurer columns: {list(insurer_df.columns)}")
-
-    column_mappings = create_dynamic_column_mappings(
-        cbl_columns=list(cbl_df.columns),
-        insurer_columns=list(insurer_df.columns),
-        custom_mappings={
-            "cbl_mappings": cbl_custom_mappings,
-            "insurer_mappings": insurer_custom_mappings,
-        },
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "profile",
+        nargs="?",
+        default="swan",
+        help=f"insurer profile ({', '.join(profiles.PROFILES)})",
     )
+    parser.add_argument(
+        "--no-matrix",
+        action="store_true",
+        help="run without the previous output, as if this were a first run",
+    )
+    args = parser.parse_args()
 
-    logger.info(f"Final CBL mappings: {column_mappings['cbl_mappings']}")
-    logger.info(f"Final Insurer mappings: {column_mappings['insurer_mappings']}")
+    name, profile = profiles.resolve(args.profile)
+
+    missing = profiles.missing_files(profile, require_prev_output=False)
+    if missing:
+        logger.error(f"Missing input files: {missing}")
+        return 1
+
+    cbl_content, insurer_content, prev_output_content = profiles.load_inputs(profile)
+
+    if args.no_matrix:
+        prev_output_content = None
+        logger.info("Matrix disabled (--no-matrix)")
+    elif prev_output_content is None:
+        logger.info(f"No previous output at {profile['prev_output']} — running without matrix")
+    else:
+        logger.info(f"Previous output (matrix) loaded: {profile['prev_output']}")
+
+    column_mappings = profiles.build_mappings(profile, cbl_content, insurer_content)
+    logger.info(f"CBL mappings:     {column_mappings['cbl_mappings']}")
+    logger.info(f"Insurer mappings: {column_mappings['insurer_mappings']}")
 
     result = run_matching_process(
         column_mappings=column_mappings,
         cbl_file=cbl_content,
         insurer_file=insurer_content,
-        output_file=f"{insurer_name}_output.xlsx",
+        output_file=f"{name}_output.xlsx",
         prev_output_file=prev_output_content,
-        dynamic_buckets=dynamic_buckets,
+        dynamic_buckets=profiles.DYNAMIC_BUCKETS,
     )
 
-    output_path = os.path.join("data", "output.xlsx")
+    output_path = os.path.join(profiles.DATA_DIR, f"output_{name}.xlsx")
     with open(output_path, "wb") as f:
         f.write(result["output_content"])
 
+    cbl_stats = result["cbl_stats"]
     logger.info(f"\nResults saved to {output_path}")
-    logger.info(f"CBL Exact Matches: {result['cbl_stats']['exact_matches']}")
-    logger.info(f"CBL Partial Matches: {result['cbl_stats']['partial_matches']}")
-    logger.info(f"CBL No Matches: {result['cbl_stats']['no_matches']}")
-    logger.info(f"Insurer Match Rate: {result['insurer_stats']['exact_match_rate']:.1f}%")
+    logger.info(f"CBL Exact Matches:   {cbl_stats['exact_matches']}")
+    logger.info(f"CBL Partial Matches: {cbl_stats['partial_matches']}")
+    logger.info(f"CBL No Matches:      {cbl_stats['no_matches']}")
+    logger.info(f"Insurer Match Rate:  {result['insurer_stats']['exact_match_rate']:.1f}%")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

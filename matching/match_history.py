@@ -4,21 +4,55 @@ Match History Layer — Pre-places rows based on a previous output file.
 
 When a user saves their reconciliation output after moving rows between
 buckets, that output becomes the source of truth (the "matrix"). This
-module reads the previous output, extracts fingerprints from each sheet,
-and automatically places matching rows into their previously assigned
-buckets before the comparison passes run.
+module reads the previous output, identifies which of its rows are present
+in the new data, and places them back into the bucket the user filed them
+in before the comparison passes run.
+
+Rows are identified by a business key built from the normalised identity
+columns (see CBL_KEY_COLUMNS). The key is recomputed from both the previous
+output and the new data on every run, so there is no stored identity string
+that can go stale when this code changes.
 """
 
+import ast
 import pandas as pd
 import logging
 import io
+import math
 import datetime as dt
 
 logger = logging.getLogger(__name__)
 
+# ── Row Identity ─────────────────────────────────────────────────────────
+# A row is identified by the columns preprocess() has already normalised —
+# uppercased, trimmed, regex-cleaned and numerically coerced. These are the
+# same columns the matching passes treat as a row's identity, and they are
+# written into every output sheet.
+#
+# Deliberately NOT included:
+#   - Presentation columns (brokerage, dates, currency) — these change
+#     without the row becoming a different transaction.
+#   - Annotation columns the broker fills in ("Timing Difference",
+#     "Correction to be done by CBL", Remarks) — annotating a row must not
+#     change its identity.
+#
+# The key is always recomputed on both sides from these columns. Never
+# persist a key and read it back: a stored key is produced by whatever
+# version of this code wrote the file, and would silently stop matching
+# the moment the normalisation here changes.
+CBL_KEY_COLUMNS = ["PlacingNo_Clean", "PolicyNo_Clean", "ProcessedAmount_Clean"]
+INSURER_KEY_COLUMNS = [
+    "PlacingNo_Clean_INSURER",
+    "PolicyNo_Clean_INSURER",
+    "ProcessedAmount_Clean_INSURER",
+]
+
 # ── Fingerprint Exclude List ─────────────────────────────────────────────
+# NOTE: fingerprints are no longer used to match rows — that is done by the
+# business key above. generate_fingerprint() is retained only to populate the
+# _fingerprint / _fingerprint_INSURER columns that the frontend still reads.
+#
 # Only columns the BACKEND creates during preprocessing, tracking, and passes.
-# The frontend MUST adopt this same list (plus any frontend-only columns).
 #
 # After exclusion, the fingerprint is built from:
 #   - Original data columns from the uploaded Excel file
@@ -99,20 +133,125 @@ def generate_fingerprints_for_df(df: pd.DataFrame) -> pd.Series:
     return df.apply(generate_fingerprint, axis=1)
 
 
+def build_row_key(row, columns):
+    """Build a row's identity key, or None if the row carries no identity.
+
+    Values are normalised so that a value written to Excel and read back
+    produces the same key:
+      - NaN / None / non-finite → ""
+      - whole-number float → str(int)   (1908.0 → "1908")
+      - other float → 2dp               (these are currency amounts)
+      - everything else → str(val).strip()
+
+    Returns None when every component is empty — such a row has no identity
+    and must not be matched, or all identity-less rows would collide.
+    """
+    parts = []
+    for col in columns:
+        val = row.get(col)
+        if val is None or (not isinstance(val, (list, dict, set)) and pd.isna(val)):
+            parts.append("")
+        elif isinstance(val, float):
+            if not math.isfinite(val):
+                parts.append("")
+            elif val == int(val):
+                parts.append(str(int(val)))
+            else:
+                parts.append(f"{val:.2f}")
+        else:
+            parts.append(str(val).strip())
+
+    if not any(parts):
+        return None
+    return "|".join(parts)
+
+
+def build_key_map(df, columns):
+    """Map row key -> list of DataFrame indices."""
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        logger.warning(f"[MATRIX] Identity columns missing {missing} — cannot match rows")
+        return {}
+
+    key_map = {}
+    for idx in df.index:
+        key = build_row_key(df.loc[idx], columns)
+        if key is not None:
+            key_map.setdefault(key, []).append(idx)
+    return key_map
+
+
+def read_bucket_config(xls):
+    """Map output sheet name -> BucketKey using the _BucketConfig sheet.
+
+    Excel truncates sheet names at 31 characters, so a bucket named
+    "Correction to be done by insurer" is written to a sheet called
+    "Correction to be done by insure". _BucketConfig records the real
+    mapping, which makes a previous output self-describing rather than
+    dependent on the caller passing a matching dynamic_buckets list.
+    """
+    if "_BucketConfig" not in xls.sheet_names:
+        return {}
+    try:
+        cfg = pd.read_excel(xls, sheet_name="_BucketConfig")
+    except Exception as e:
+        logger.warning(f"[MATRIX] Could not read _BucketConfig: {e}")
+        return {}
+
+    if not {"SheetName", "BucketKey"}.issubset(cfg.columns):
+        return {}
+
+    return {
+        str(r["SheetName"]).strip(): str(r["BucketKey"]).strip()
+        for _, r in cfg.iterrows()
+        if pd.notna(r["SheetName"]) and pd.notna(r["BucketKey"])
+    }
+
+
+def count_insurer_indices(value):
+    """How many insurer rows a previous output's row claims.
+
+    matched_insurer_indices round-trips through Excel as the repr of a list.
+    The indices themselves point into the previous run's insurer file and are
+    meaningless now — only the count is used, to tell how many continuation
+    rows follow an anchor.
+    """
+    if value is None or (not isinstance(value, (list, tuple, set)) and pd.isna(value)):
+        return 0
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    try:
+        parsed = ast.literal_eval(str(value))
+    except (ValueError, SyntaxError):
+        return 0
+    return len(parsed) if isinstance(parsed, (list, tuple, set)) else 0
+
+
 def read_previous_output(prev_output_source):
     """Read a previous output file and extract placement records.
 
-    Each sheet maps to a target bucket. Rows are grouped by group_id
-    within each sheet. Fingerprints (_fingerprint, _fingerprint_INSURER)
-    identify which rows from the new data should be pre-placed.
+    Each sheet maps to a target bucket — via _BucketConfig where present,
+    which survives Excel's 31-character sheet name truncation. Rows are
+    grouped by group_id within each sheet, and identified by the business
+    key built from their normalised identity columns.
+
+    Group ids are only used to keep rows that belong together in one
+    placement, so the id read from the file is discarded and a fresh
+    MATRIX_GRP_n is issued. The ids in the previous output were minted by
+    that run's own sequential counters (MATCH_n, MERGED_GROUP_n,
+    NAME_GROUP_n), and this run's counters restart at 1 — reusing them
+    would let an unrelated match land in a restored group. Re-issuing
+    rather than prefixing keeps this stable across generations: a
+    previous output may legitimately contain both "MATCH_68" and a
+    restored "MATRIX_..._MATCH_68", which any prefix scheme would
+    eventually collapse back together.
 
     Args:
         prev_output_source: File content (bytes), file path (str), or None.
 
     Returns:
-        list[dict]: Placement records, each with target_bucket,
-            cbl_fingerprints, insurer_fingerprints, group_id,
-            cbl_remarks, insurer_remarks.
+        list[dict]: Placement records, each with target_bucket, cbl_keys,
+            insurer_keys, group_id, cbl_remarks, insurer_remarks.
     """
     if prev_output_source is None:
         return []
@@ -131,15 +270,22 @@ def read_previous_output(prev_output_source):
         "Partial Matches": "partial",
         "No Matches CBL": "no-match",
     }
-    SKIP_SHEETS = {"No Matches Insurer", "_BucketConfig"}
+    SKIP_SHEETS = {"No Matches Insurer", "_BucketConfig", "Summary"}
 
+    sheet_to_bucket_key = read_bucket_config(xls)
     placements = []
+    restored_group_counter = 0
 
     for sheet_name in xls.sheet_names:
         if sheet_name in SKIP_SHEETS:
             continue
 
-        target_bucket = SHEET_TO_BUCKET.get(sheet_name, sheet_name)
+        # Base buckets are fixed; dynamic buckets resolve through
+        # _BucketConfig, falling back to the sheet name itself.
+        target_bucket = (
+            SHEET_TO_BUCKET.get(sheet_name)
+            or sheet_to_bucket_key.get(sheet_name, sheet_name)
+        )
 
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name)
@@ -150,19 +296,29 @@ def read_previous_output(prev_output_source):
         if df.empty:
             continue
 
-        has_cbl_fp = "_fingerprint" in df.columns
-        has_ins_fp = "_fingerprint_INSURER" in df.columns
+        has_cbl_key = all(c in df.columns for c in CBL_KEY_COLUMNS)
+        has_ins_key = all(c in df.columns for c in INSURER_KEY_COLUMNS)
 
-        if not has_cbl_fp and not has_ins_fp:
-            logger.warning(f"[MATRIX] Sheet '{sheet_name}' has no fingerprint columns — skipping")
+        if not has_cbl_key and not has_ins_key:
+            logger.warning(f"[MATRIX] Sheet '{sheet_name}' has no identity columns — skipping")
             continue
 
         has_group = "group_id" in df.columns
         has_remarks = "Remarks" in df.columns
         has_ins_remarks = "Remarks_INSURER" in df.columns
 
+        has_indices = "matched_insurer_indices" in df.columns
+
+        # Rows that belong to one match are tied together by group_id, but
+        # only cluster matches ever got one. A combination match (one CBL row
+        # against several insurer rows) is written as an anchor row plus
+        # insurer-only continuation rows, historically with no group_id at
+        # all — reading those as independent records silently drops their
+        # amounts from the match. The anchor states how many insurer rows it
+        # holds, so claim exactly that many following CBL-less rows.
         grouped_indices = {}
-        ungrouped_indices = []
+        ungrouped_blocks = []
+        owed = 0
 
         for idx in df.index:
             gk = None
@@ -170,59 +326,75 @@ def read_previous_output(prev_output_source):
                 val = df.at[idx, "group_id"]
                 if pd.notna(val) and str(val).strip():
                     gk = str(val).strip()
+
             if gk is not None:
                 grouped_indices.setdefault(gk, []).append(idx)
+                owed = 0
+                continue
+
+            if has_cbl_key and build_row_key(df.loc[idx], CBL_KEY_COLUMNS) is not None:
+                ungrouped_blocks.append([idx])
+                owed = max(0, count_insurer_indices(df.at[idx, "matched_insurer_indices"]) - 1) if has_indices else 0
+                continue
+
+            is_insurer_row = has_ins_key and build_row_key(df.loc[idx], INSURER_KEY_COLUMNS) is not None
+            if is_insurer_row and owed > 0 and ungrouped_blocks:
+                ungrouped_blocks[-1].append(idx)
+                owed -= 1
             else:
-                ungrouped_indices.append(idx)
+                # A standalone insurer-only placement, not a continuation.
+                ungrouped_blocks.append([idx])
+                owed = 0
 
-        for group_id, indices in grouped_indices.items():
+        def keys_for(indices, columns, enabled):
+            if not enabled:
+                return []
+            keys = []
+            for i in indices:
+                key = build_row_key(df.loc[i], columns)
+                if key is not None:
+                    keys.append(key)
+            return keys
+
+        for indices in grouped_indices.values():
+            cbl_keys = keys_for(indices, CBL_KEY_COLUMNS, has_cbl_key)
+            ins_keys = keys_for(indices, INSURER_KEY_COLUMNS, has_ins_key)
+            if not cbl_keys and not ins_keys:
+                continue
+
+            restored_group_counter += 1
             subset = df.loc[indices]
-            cbl_fps = []
-            ins_fps = []
-            cbl_remarks_list = []
-            ins_remarks_list = []
+            placements.append({
+                "target_bucket": target_bucket,
+                "cbl_keys": cbl_keys,
+                "insurer_keys": ins_keys,
+                "group_id": f"MATRIX_GRP_{restored_group_counter}",
+                "cbl_remarks": [r if pd.notna(r) else "" for r in subset["Remarks"]] if has_remarks else [],
+                "insurer_remarks": [r if pd.notna(r) else "" for r in subset["Remarks_INSURER"]] if has_ins_remarks else [],
+            })
 
-            if has_cbl_fp:
-                cbl_fps = [fp for fp in subset["_fingerprint"] if pd.notna(fp) and str(fp).strip()]
-            if has_ins_fp:
-                ins_fps = [fp for fp in subset["_fingerprint_INSURER"] if pd.notna(fp) and str(fp).strip()]
-            if has_remarks:
-                cbl_remarks_list = [r if pd.notna(r) else "" for r in subset["Remarks"]]
-            if has_ins_remarks:
-                ins_remarks_list = [r if pd.notna(r) else "" for r in subset["Remarks_INSURER"]]
+        for block in ungrouped_blocks:
+            cbl_keys = keys_for(block, CBL_KEY_COLUMNS, has_cbl_key)
+            ins_keys = keys_for(block, INSURER_KEY_COLUMNS, has_ins_key)
+            if not cbl_keys and not ins_keys:
+                continue
 
-            if cbl_fps or ins_fps:
-                placements.append({
-                    "target_bucket": target_bucket,
-                    "cbl_fingerprints": cbl_fps,
-                    "insurer_fingerprints": ins_fps,
-                    "group_id": group_id,
-                    "cbl_remarks": cbl_remarks_list,
-                    "insurer_remarks": ins_remarks_list,
-                })
+            # A multi-row block is one match spread over several rows. Give it
+            # an id so it is written back as a group and stays readable next run.
+            group_id = None
+            if len(block) > 1:
+                restored_group_counter += 1
+                group_id = f"MATRIX_GRP_{restored_group_counter}"
 
-        for idx in ungrouped_indices:
-            row = df.loc[idx]
-            cbl_fps = []
-            ins_fps = []
-
-            if has_cbl_fp and pd.notna(row.get("_fingerprint")) and str(row["_fingerprint"]).strip():
-                cbl_fps = [str(row["_fingerprint"])]
-            if has_ins_fp and pd.notna(row.get("_fingerprint_INSURER")) and str(row["_fingerprint_INSURER"]).strip():
-                ins_fps = [str(row["_fingerprint_INSURER"])]
-
-            cbl_rem = [str(row.get("Remarks", ""))] if has_remarks else []
-            ins_rem = [str(row.get("Remarks_INSURER", ""))] if has_ins_remarks else []
-
-            if cbl_fps or ins_fps:
-                placements.append({
-                    "target_bucket": target_bucket,
-                    "cbl_fingerprints": cbl_fps,
-                    "insurer_fingerprints": ins_fps,
-                    "group_id": None,
-                    "cbl_remarks": cbl_rem,
-                    "insurer_remarks": ins_rem,
-                })
+            subset = df.loc[block]
+            placements.append({
+                "target_bucket": target_bucket,
+                "cbl_keys": cbl_keys,
+                "insurer_keys": ins_keys,
+                "group_id": group_id,
+                "cbl_remarks": [r if pd.notna(r) else "" for r in subset["Remarks"]] if has_remarks else [],
+                "insurer_remarks": [r if pd.notna(r) else "" for r in subset["Remarks_INSURER"]] if has_ins_remarks else [],
+            })
 
     logger.info(f"[MATRIX] Read {len(placements)} placement records from previous output ({len(xls.sheet_names)} sheets)")
     return placements
@@ -252,25 +424,16 @@ def apply_previous_output(cbl_df, insurer_df, prev_output_source, global_tracker
 
     logger.info(f"[MATRIX] Found {len(placements)} placement records — matching against new data...")
 
-    if "_fingerprint" not in cbl_df.columns or "_fingerprint_INSURER" not in insurer_df.columns:
-        logger.warning("[MATRIX] Canonical fingerprints not found — generating on the fly")
-        cbl_df["_fingerprint"] = generate_fingerprints_for_df(cbl_df)
-        insurer_cols_stripped = {
-            col: col[:-len("_INSURER")] if col.endswith("_INSURER") else col
-            for col in insurer_df.columns
-        }
-        fp_insurer_source = insurer_df.rename(columns=insurer_cols_stripped)
-        insurer_df["_fingerprint_INSURER"] = generate_fingerprints_for_df(fp_insurer_source)
+    # Keys are computed fresh on both sides by the same code, so there is no
+    # stored identity that can drift out of step with this implementation.
+    cbl_key_map = build_key_map(cbl_df, CBL_KEY_COLUMNS)
+    insurer_key_map = build_key_map(insurer_df, INSURER_KEY_COLUMNS)
 
-    cbl_fp_map = {}
-    for idx, fp in cbl_df["_fingerprint"].items():
-        cbl_fp_map.setdefault(fp, []).append(idx)
+    logger.info(f"[MATRIX] Unique CBL keys: {len(cbl_key_map)}, Unique insurer keys: {len(insurer_key_map)}")
 
-    insurer_fp_map = {}
-    for idx, fp in insurer_df["_fingerprint_INSURER"].items():
-        insurer_fp_map.setdefault(fp, []).append(idx)
-
-    logger.info(f"[MATRIX] Unique CBL fingerprints: {len(cbl_fp_map)}, Unique insurer fingerprints: {len(insurer_fp_map)}")
+    if not cbl_key_map and not insurer_key_map:
+        logger.warning("[MATRIX] No identity keys could be built — skipping pre-placement")
+        return cbl_df, insurer_df, {"exact": 0, "partial": 0, "no-match": 0}, [], {}
 
     claimed_cbl = set()
     claimed_insurer = set()
@@ -303,25 +466,23 @@ def apply_previous_output(cbl_df, insurer_df, prev_output_source, global_tracker
         cbl_remarks_list = record.get("cbl_remarks", [])
         ins_remarks_list = record.get("insurer_remarks", [])
 
-        for fp_idx, fp in enumerate(record["cbl_fingerprints"]):
-            if fp in cbl_fp_map:
-                for idx in cbl_fp_map[fp]:
-                    if idx not in claimed_cbl:
-                        entry_cbl_indices.append(idx)
-                        claimed_cbl.add(idx)
-                        if fp_idx < len(cbl_remarks_list) and cbl_remarks_list[fp_idx]:
-                            cbl_df.at[idx, "Remarks"] = cbl_remarks_list[fp_idx]
-                        break
+        for key_idx, key in enumerate(record["cbl_keys"]):
+            for idx in cbl_key_map.get(key, []):
+                if idx not in claimed_cbl:
+                    entry_cbl_indices.append(idx)
+                    claimed_cbl.add(idx)
+                    if key_idx < len(cbl_remarks_list) and cbl_remarks_list[key_idx]:
+                        cbl_df.at[idx, "Remarks"] = cbl_remarks_list[key_idx]
+                    break
 
-        for fp_idx, fp in enumerate(record["insurer_fingerprints"]):
-            if fp in insurer_fp_map:
-                for idx in insurer_fp_map[fp]:
-                    if idx not in claimed_insurer:
-                        entry_insurer_indices.append(idx)
-                        claimed_insurer.add(idx)
-                        if fp_idx < len(ins_remarks_list) and ins_remarks_list[fp_idx]:
-                            insurer_df.at[idx, "Remarks_INSURER"] = ins_remarks_list[fp_idx]
-                        break
+        for key_idx, key in enumerate(record["insurer_keys"]):
+            for idx in insurer_key_map.get(key, []):
+                if idx not in claimed_insurer:
+                    entry_insurer_indices.append(idx)
+                    claimed_insurer.add(idx)
+                    if key_idx < len(ins_remarks_list) and ins_remarks_list[key_idx]:
+                        insurer_df.at[idx, "Remarks_INSURER"] = ins_remarks_list[key_idx]
+                    break
 
         if not entry_cbl_indices and not entry_insurer_indices:
             continue
@@ -359,7 +520,10 @@ def apply_previous_output(cbl_df, insurer_df, prev_output_source, global_tracker
 
         group_id = record.get("group_id")
         if group_id is None and len(entry_cbl_indices) > 1:
-            group_id = f"MATRIX_{group_counter}"
+            # Ungrouped record whose key matched several CBL rows. Distinct
+            # prefix from the MATRIX_GRP_n issued by read_previous_output so
+            # the two allocators cannot collide.
+            group_id = f"MATRIX_KEY_{group_counter}"
             group_counter += 1
 
         for cbl_idx in entry_cbl_indices:
@@ -476,6 +640,7 @@ def finalize_rematch_buckets(cbl_df, rematch_stash, global_tracker=None):
 
     matched_by_pass = 0
     returned_to_bucket = 0
+    demoted_to_no_match = 0
 
     FALLBACK_STATUS = {
         "partial": "Partial Match",
@@ -489,23 +654,40 @@ def finalize_rematch_buckets(cbl_df, rematch_stash, global_tracker=None):
 
         for cbl_idx in cbl_indices:
             current_status = cbl_df.at[cbl_idx, "match_status"]
-            if current_status == "No Match":
-                available_insurer = [idx for idx in insurer_indices if idx not in all_claimed_insurer]
-                fallback_status = FALLBACK_STATUS.get(target, target)
-                cbl_df.at[cbl_idx, "match_status"] = fallback_status
-                cbl_df.at[cbl_idx, "matched_insurer_indices"] = available_insurer
-                cbl_df.at[cbl_idx, "match_reason"] = f"Matrix rematch fallback ({target})"
-                cbl_df.at[cbl_idx, "match_pass"] = ["matrix-rematch"]
-                cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "matrix-rematch"
-                returned_to_bucket += 1
-                logger.info(f"[REMATCH] CBL idx={cbl_idx} still unmatched — returned to bucket '{target}' with {len(available_insurer)}/{len(insurer_indices)} insurer rows")
-            else:
+            if current_status != "No Match":
                 matched_by_pass += 1
                 logger.info(f"[REMATCH] CBL idx={cbl_idx} matched by pass (status='{current_status}') — keeping")
+                continue
+
+            available_insurer = [idx for idx in insurer_indices if idx not in all_claimed_insurer]
+
+            if target == "partial" and not available_insurer:
+                # Every insurer row that justified the partial was claimed by
+                # a stronger match this run, so there is nothing left to be
+                # partial against. Record that plainly here rather than let
+                # output generation silently demote a insurer-less
+                # "Partial Match" and leave a contradictory match_reason.
+                cbl_df.at[cbl_idx, "match_status"] = "No Match"
+                cbl_df.at[cbl_idx, "match_reason"] = (
+                    "Matrix rematch fallback (partial) — insurer rows reclaimed by a stronger match"
+                )
+                demoted_to_no_match += 1
+                logger.info(f"[REMATCH] CBL idx={cbl_idx} was partial but all insurer rows reclaimed — now No Match")
+            else:
+                cbl_df.at[cbl_idx, "match_status"] = FALLBACK_STATUS.get(target, target)
+                cbl_df.at[cbl_idx, "match_reason"] = f"Matrix rematch fallback ({target})"
+                returned_to_bucket += 1
+                logger.info(f"[REMATCH] CBL idx={cbl_idx} still unmatched — returned to bucket '{target}' with {len(available_insurer)}/{len(insurer_indices)} insurer rows")
+
+            cbl_df.at[cbl_idx, "matched_insurer_indices"] = available_insurer
+            cbl_df.at[cbl_idx, "match_pass"] = ["matrix-rematch"]
+            cbl_df.at[cbl_idx, "match_resolved_in_pass"] = "matrix-rematch"
 
     logger.info(f"[REMATCH] ========== REMATCH SUMMARY ==========")
     logger.info(f"[REMATCH] Matched by passes:    {matched_by_pass}")
     logger.info(f"[REMATCH] Returned to bucket:   {returned_to_bucket}")
+    if demoted_to_no_match:
+        logger.info(f"[REMATCH] Partial -> No Match:  {demoted_to_no_match} (insurer rows reclaimed)")
     logger.info(f"[REMATCH] ==========================================")
 
     return cbl_df
